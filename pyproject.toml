@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worm-qr-segmenter"
+version = "0.6.0"
+description = "Batch worm segmentation with QR-code sample metadata extraction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Worm analysis pipeline" }]
+dependencies = [
+    "numpy>=1.23",
+    "opencv-python>=4.8",
+    "pandas>=2.0",
+    "scikit-image>=0.21",
+    "matplotlib>=3.7",
+    "tifffile>=2023.7.10",
+    "tqdm>=4.65"
+]
+
+[project.optional-dependencies]
+cellpose = ["cellpose[gui]>=4"]
+qr-extra = ["pyzbar>=0.1.9"]
+app = ["pyarrow>=14", "streamlit>=1.32", "plotly>=5.18"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+worm-qr-segment = "worm_qr_segmenter.cli:main"
+worm-qr-build-db = "worm_qr_segmenter.database:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
