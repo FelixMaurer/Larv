@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-import os
 from pathlib import Path
 from typing import Iterable
 
@@ -10,23 +8,17 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-try:
-    from worm_qr_segmenter.database import load_database
-except Exception:  # pragma: no cover - keeps Streamlit error display readable
-    load_database = None
-
 
 st.set_page_config(page_title="Larvae QR Grid Explorer", layout="wide")
 
-
-GRID_X_DEFAULT = "qr_reihe"
-GRID_Y_DEFAULT = "qr_spalte"
+APP_DIR = Path(__file__).resolve().parent
 DEFAULT_MM_PER_PX = 0.14
-
+DEFAULT_X = "qr_reihe"   # Row on horizontal axis
+DEFAULT_Y = "qr_spalte"  # Column on vertical axis
 
 DISPLAY_NAMES = {
-    "qr_spalte": "Column",
     "qr_reihe": "Row",
+    "qr_spalte": "Column",
     "qr_plot": "Plot",
     "qr_condition": "Condition",
     "qr_sample_id": "Sample ID",
@@ -38,81 +30,112 @@ DISPLAY_NAMES = {
     "median_skeleton_length_px": "Median skeleton length (px)",
     "mean_axis_major_px": "Mean major axis length (px)",
     "median_axis_major_px": "Median major axis length (px)",
+    "mean_axis_minor_px": "Mean minor axis length (px)",
+    "median_axis_minor_px": "Median minor axis length (px)",
     "mean_area_px": "Mean area (px²)",
     "median_area_px": "Median area (px²)",
     "mean_aspect_ratio": "Mean aspect ratio",
+    "median_aspect_ratio": "Median aspect ratio",
     "mean_eccentricity": "Mean eccentricity",
     "mean_solidity": "Mean solidity",
     "mean_perimeter_px": "Mean perimeter (px)",
+    "median_perimeter_px": "Median perimeter (px)",
     "n_raw_masks": "Raw masks",
     "n_rejected_masks": "Rejected masks",
     "valid_region_fraction": "Valid region fraction",
 }
 
+PREFERRED_METRICS = [
+    "count",
+    "mean_skeleton_length_px",
+    "median_skeleton_length_px",
+    "mean_axis_major_px",
+    "median_axis_major_px",
+    "mean_axis_minor_px",
+    "mean_area_px",
+    "median_area_px",
+    "mean_aspect_ratio",
+    "mean_eccentricity",
+    "mean_solidity",
+    "mean_perimeter_px",
+    "n_raw_masks",
+    "n_rejected_masks",
+    "valid_region_fraction",
+]
 
 METRIC_COLOR_SCALES = {
     "count": "Viridis",
     "length": "Cividis",
     "skeleton": "Cividis",
+    "axis": "Cividis",
     "area": "YlOrBr",
     "aspect": "Plasma",
     "eccentricity": "Turbo",
     "solidity": "Greens",
     "perimeter": "Blues",
-    "raw": "Magma",
     "rejected": "Reds",
+    "raw": "Magma",
+}
+
+ID_LIKE_COLUMNS = {
+    "qr_reihe", "qr_spalte", "qr_plot", "qr_sample_id", "qr_detected",
+    "original_image_height_px", "original_image_width_px",
+    "working_image_height_px", "working_image_width_px",
+    "roi_y0", "roi_y1", "roi_x0", "roi_x1",
+    "crop_height_px", "crop_width_px", "coordinate_scale", "scale_factor",
 }
 
 
 def main() -> None:
     st.title("Larvae QR Grid Explorer")
     st.caption(
-        "Loads the parquet database produced by the database builder and plots image-level metrics "
-        "by QR row and column. The default orientation puts Row on the horizontal x-axis and Column on the vertical y-axis. Missing positions are left empty; duplicate measurements at one grid position "
-        "are averaged by default."
+        "Flat GitHub/Streamlit version. Loads image_summary.parquet or image_summary.csv "
+        "from the repository root, plots QR grid data, and averages duplicate grid positions by default."
     )
 
-    db_dir = _database_selector()
-    if load_database is None:
-        st.error("Could not import the database loader. Run the app from an installed checkout with `pip install -e .[app]`.")
-        st.stop()
-
-    try:
-        images_df, worms_df, summary_df = load_database(db_dir)
-    except Exception as exc:
-        st.error(f"Could not load database from {db_dir}: {exc}")
-        st.stop()
+    summary_df = load_required_table("image_summary")
+    images_df = load_optional_table("images")
+    larvae_df = load_optional_table("worms")  # existing export filename; UI still calls these larvae
 
     if summary_df.empty:
-        st.warning("The image_summary table is empty.")
+        st.error("image_summary is empty.")
+        st.stop()
+
+    summary_df = clean_columns(summary_df)
+    summary_df = normalize_common_columns(summary_df)
+
+    required = {DEFAULT_X, DEFAULT_Y}
+    missing = sorted(required - set(summary_df.columns))
+    if missing:
+        st.error(f"Missing required QR grid columns: {', '.join(missing)}")
+        st.write("Available columns:", list(summary_df.columns))
         st.stop()
 
     with st.sidebar:
         st.header("Filters")
-        filtered = _apply_filters(summary_df)
+        filtered = apply_filters(summary_df)
 
         st.header("Grid")
-        numeric_or_categorical = [c for c in filtered.columns if c.startswith("qr_") or pd.api.types.is_numeric_dtype(filtered[c])]
+        grid_cols = available_grid_columns(filtered)
         x_col = st.selectbox(
             "X axis",
-            numeric_or_categorical,
-            index=_index_or_zero(numeric_or_categorical, GRID_X_DEFAULT),
-            format_func=_display_name,
+            grid_cols,
+            index=index_or_zero(grid_cols, DEFAULT_X),
+            format_func=display_name,
         )
         y_col = st.selectbox(
             "Y axis",
-            numeric_or_categorical,
-            index=_index_or_zero(numeric_or_categorical, GRID_Y_DEFAULT),
-            format_func=_display_name,
+            grid_cols,
+            index=index_or_zero(grid_cols, DEFAULT_Y),
+            format_func=display_name,
         )
 
         st.header("Units")
         unit_mode = st.radio(
             "Measurement units",
-            ["pixels", "metric"],
-            index=1,
-            format_func=lambda v: "Pixels" if v == "pixels" else "Metric dimensions",
-            help="Pixel mode shows the raw half-scale working-pixel values. Metric mode converts length-like metrics to mm and area-like metrics to mm².",
+            ["metric", "pixels"],
+            index=0,
+            format_func=lambda v: "Metric dimensions" if v == "metric" else "Pixels",
         )
         mm_per_px = st.number_input(
             "Scale factor (mm/px)",
@@ -121,85 +144,89 @@ def main() -> None:
             value=DEFAULT_MM_PER_PX,
             step=0.01,
             format="%.4f",
-            help="Conversion factor for one working pixel. Default is 0.14 mm/px.",
         )
 
-        metric_cols = _metric_columns(filtered, exclude={x_col, y_col})
-        default_metric = "count" if "count" in metric_cols else (metric_cols[0] if metric_cols else None)
-        if default_metric is None:
-            st.error("No numeric metric columns are available in image_summary.")
+        st.header("Metric")
+        metrics = metric_columns(filtered, exclude={x_col, y_col})
+        if not metrics:
+            st.error("No numeric metric columns found.")
             st.stop()
+        default_metric = "count" if "count" in metrics else metrics[0]
         metric = st.selectbox(
-            "Metric",
-            metric_cols,
-            index=_index_or_zero(metric_cols, default_metric),
-            format_func=lambda c: _display_name(c, unit_mode),
+            "Parameter",
+            metrics,
+            index=index_or_zero(metrics, default_metric),
+            format_func=lambda c: display_name(c, unit_mode=unit_mode),
         )
-        metric_label = _display_name(metric, unit_mode)
-        if unit_mode == "metric" and _metric_unit_exponent(metric) == 0:
-            st.caption(f"{metric_label} is dimensionless or categorical and is not converted by the scale factor.")
+        metric_label = display_name(metric, unit_mode=unit_mode)
 
-        agg_options = ["mean", "median", "sum", "min", "max", "count"]
         agg = st.selectbox(
             "Duplicate grid positions",
-            agg_options,
-            index=agg_options.index("mean"),
-            help="How to combine multiple images with the same row and column. Mean is the default for all metrics, including larva count.",
+            ["mean", "median", "sum", "min", "max", "count"],
+            index=0,
+            help="Mean is the default. This also averages duplicated larva counts at the same grid position.",
         )
 
-        z_scale = st.selectbox(
-            "3D bar height transform",
-            ["linear", "sqrt", "log1p"],
-            index=0,
-            help="Transform applied before visual height normalization. Color still encodes the raw metric value.",
-        )
-        z_height_fraction = st.slider(
-            "3D maximum height",
+        st.header("3D display")
+        z_transform = st.selectbox("Height transform", ["linear", "sqrt", "log1p"], index=0)
+        max_height = st.slider(
+            "Maximum 3D height",
             min_value=0.05,
             max_value=1.50,
             value=0.35,
             step=0.05,
-            help="Maximum bar height as a fraction of the grid footprint. Lower values make the 3D plot less vertically exaggerated.",
+            help="Visual bar-height compression. Colors still represent the selected metric values.",
         )
-        show_value_table = st.checkbox("Show pivot table", value=True)
 
-    grid = _make_grid(filtered, x_col=x_col, y_col=y_col, metric=metric, agg=agg, unit_mode=unit_mode, mm_per_px=mm_per_px)
-    values = grid["value"]
+    if filtered.empty:
+        st.warning("No rows remain after filtering.")
+        st.stop()
+
+    grid = make_grid(
+        filtered,
+        x_col=x_col,
+        y_col=y_col,
+        metric=metric,
+        agg=agg,
+        unit_mode=unit_mode,
+        mm_per_px=mm_per_px,
+    )
 
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Images", f"{len(filtered):,}")
     kpi2.metric("Grid positions", f"{len(grid):,}")
-    kpi3.metric("Non-missing values", f"{values.notna().sum():,}")
+    kpi3.metric("Non-missing values", f"{grid['value'].notna().sum():,}")
     if "count" in filtered.columns:
-        kpi4.metric("Total larvae", f"{int(pd.to_numeric(filtered['count'], errors='coerce').fillna(0).sum()):,}")
+        kpi4.metric("Total larvae", f"{pd.to_numeric(filtered['count'], errors='coerce').fillna(0).sum():.0f}")
+    elif not larvae_df.empty:
+        kpi4.metric("Larva rows", f"{len(larvae_df):,}")
     else:
-        kpi4.metric("Larva rows", f"{len(worms_df):,}")
+        kpi4.metric("Larva rows", "n/a")
 
-    tab_map, tab_3d, tab_table, tab_rows = st.tabs(["2D map", "3D bars", "Counter grid", "Rows"])
+    tab_2d, tab_3d, tab_values, tab_rows = st.tabs(["2D map", "3D bars", "Counter grid", "Rows"])
 
-    # Streamlit opens the first tab by default, so the 2D map is now the default view.
-    with tab_map:
+    with tab_2d:
         st.plotly_chart(
-            _make_heatmap_figure(grid, x_col=x_col, y_col=y_col, metric=metric, metric_label=metric_label),
+            make_heatmap(grid, x_col=x_col, y_col=y_col, metric=metric, metric_label=metric_label),
             use_container_width=True,
         )
 
     with tab_3d:
         st.plotly_chart(
-            _make_3d_bar_figure(
+            make_3d_bars(
                 grid,
                 x_col=x_col,
                 y_col=y_col,
                 metric=metric,
                 metric_label=metric_label,
-                z_scale=z_scale,
-                z_height_fraction=z_height_fraction,
+                z_transform=z_transform,
+                max_height=max_height,
             ),
             use_container_width=True,
         )
 
-    with tab_table:
-        pivot = _pivot_grid(grid)
+    with tab_values:
+        pivot = pivot_grid(grid)
         st.dataframe(pivot, use_container_width=True)
         st.download_button(
             "Download current grid as CSV",
@@ -209,105 +236,107 @@ def main() -> None:
         )
 
     with tab_rows:
-        columns_to_show = _unique_existing_columns(
-            [y_col, x_col, metric, "count", "qr_plot", "qr_condition", "qr_sample_id", "original_filename", "output_basename"],
+        show_cols = unique_existing_columns(
+            [y_col, x_col, metric, "count", "qr_plot", "qr_condition", "qr_sample_id", "original_filename", "output_basename", "qr_text"],
             filtered.columns,
         )
-        extra = [c for c in filtered.columns if c not in columns_to_show]
-        rows_df = filtered[columns_to_show + extra[:25]].copy()
-        rows_df = _convert_dataframe_units(rows_df, unit_mode=unit_mode, mm_per_px=mm_per_px)
-        rows_df = _rename_for_display(rows_df, unit_mode=unit_mode)
-        st.dataframe(rows_df, use_container_width=True, height=500)
-
-    if show_value_table:
-        st.subheader("Current grid values")
-        st.dataframe(_pivot_grid(grid), use_container_width=True)
+        extra = [c for c in filtered.columns if c not in show_cols][:30]
+        rows = filtered[show_cols + extra].copy()
+        rows = convert_dataframe_units(rows, unit_mode=unit_mode, mm_per_px=mm_per_px)
+        rows = rename_for_display(rows, unit_mode=unit_mode)
+        st.dataframe(rows, use_container_width=True, height=520)
 
 
-def _database_selector() -> Path:
-    default = os.environ.get("WORM_QR_DB", "data/worm_database")
-    with st.sidebar:
-        st.header("Database")
-        text = st.text_input("Database folder", default)
-        st.caption("Folder containing the database parquet files and image_summary.parquet.")
-    return Path(text).expanduser()
+def load_required_table(stem: str) -> pd.DataFrame:
+    df = load_optional_table(stem)
+    if df.empty:
+        st.error(
+            f"Could not find {stem}.parquet or {stem}.csv next to streamlit_app.py. "
+            "For the flat GitHub version, place image_summary.parquet in the repository root."
+        )
+        st.stop()
+    return df
 
 
-def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
-    filtered = df.copy()
-
-    if "qr_plot" in filtered.columns:
-        options = _sorted_options(filtered["qr_plot"])
-        selected = st.multiselect("Plot", options, default=options)
-        filtered = _filter_in(filtered, "qr_plot", selected)
-
-    if "qr_condition" in filtered.columns:
-        options = _sorted_options(filtered["qr_condition"])
-        selected = st.multiselect("Condition", options, default=options)
-        filtered = _filter_in(filtered, "qr_condition", selected)
-
-    if "qr_sample_id" in filtered.columns:
-        options = _sorted_options(filtered["qr_sample_id"])
-        if len(options) <= 50:
-            selected = st.multiselect("Sample ID", options, default=options)
-            filtered = _filter_in(filtered, "qr_sample_id", selected)
-        else:
-            st.caption(f"Sample ID filter hidden because there are {len(options)} distinct values.")
-
-    return filtered
-
-
-def _filter_in(df: pd.DataFrame, col: str, selected: list[object]) -> pd.DataFrame:
-    if not selected:
-        return df.iloc[0:0]
-    return df[df[col].isin(selected)]
-
-
-def _sorted_options(series: pd.Series) -> list[object]:
-    vals = series.dropna().unique().tolist()
+def load_optional_table(stem: str) -> pd.DataFrame:
+    parquet_path = APP_DIR / f"{stem}.parquet"
+    csv_path = APP_DIR / f"{stem}.csv"
     try:
-        return sorted(vals)
-    except TypeError:
-        return sorted(vals, key=lambda x: str(x))
+        if parquet_path.exists():
+            return pd.read_parquet(parquet_path)
+        if csv_path.exists():
+            return pd.read_csv(csv_path)
+    except Exception as exc:
+        st.error(f"Could not load {stem}: {exc}")
+        st.stop()
+    return pd.DataFrame()
 
 
-def _metric_columns(df: pd.DataFrame, exclude: set[str]) -> list[str]:
-    blocked_prefixes = ("bbox_", "centroid_", "roi_", "crop_", "original_image_", "working_image_")
-    blocked_exact = {
-        "qr_plot",
-        "qr_spalte",
-        "qr_reihe",
-        "qr_sample_id",
-        "scale_factor",
-    }
-    cols = []
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # Remove exact duplicates and CSV-mangled duplicates such as count.1 when present.
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+    keep = []
+    seen = set()
     for col in df.columns:
-        if col in exclude or col in blocked_exact:
+        base = col.rsplit(".", 1)[0] if col.rsplit(".", 1)[-1].isdigit() else col
+        if base in seen:
             continue
-        if col.startswith(blocked_prefixes):
-            continue
-        if pd.api.types.is_numeric_dtype(df[col]):
-            cols.append(col)
-    preferred = [
-        "count",
-        "mean_skeleton_length_px",
-        "median_skeleton_length_px",
-        "mean_axis_major_px",
-        "mean_area_px",
-        "mean_aspect_ratio",
-        "mean_eccentricity",
-        "mean_solidity",
-        "mean_perimeter_px",
-        "n_raw_masks",
-        "n_rejected_masks",
-    ]
-    ordered = [c for c in preferred if c in cols]
-    ordered += [c for c in cols if c not in ordered]
-    return ordered
+        keep.append(col)
+        seen.add(base)
+    df = df[keep].copy()
+    df.columns = [c.rsplit(".", 1)[0] if c.rsplit(".", 1)[-1].isdigit() else c for c in df.columns]
+    return df
 
 
-def _make_grid(
+def normalize_common_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in ["qr_reihe", "qr_spalte", "qr_plot", "qr_sample_id", "count"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if "qr_detected" in out.columns:
+        only_detected = st.checkbox("Only rows with decoded QR", value=False)
+        if only_detected:
+            s = out["qr_detected"]
+            if s.dtype == bool:
+                out = out[s]
+            else:
+                out = out[s.astype(str).str.lower().isin(["true", "1", "yes"])]
+
+    for col in ["qr_plot", "qr_condition", "qr_sample_id"]:
+        if col not in out.columns:
+            continue
+        options = sorted([x for x in out[col].dropna().unique().tolist()], key=lambda v: str(v))
+        if not options:
+            continue
+        selected = st.multiselect(display_name(col), options, default=options)
+        out = out[out[col].isin(selected)]
+
+    return out
+
+
+def available_grid_columns(df: pd.DataFrame) -> list[str]:
+    preferred = [c for c in ["qr_reihe", "qr_spalte", "qr_plot", "qr_sample_id"] if c in df.columns]
+    numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in preferred]
+    return preferred + numeric
+
+
+def metric_columns(df: pd.DataFrame, exclude: set[str]) -> list[str]:
+    numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in exclude]
+    preferred = [c for c in PREFERRED_METRICS if c in numeric]
+    rest = [c for c in numeric if c not in preferred and c not in ID_LIKE_COLUMNS]
+    return preferred + rest
+
+
+def make_grid(
     df: pd.DataFrame,
+    *,
     x_col: str,
     y_col: str,
     metric: str,
@@ -315,466 +344,162 @@ def _make_grid(
     unit_mode: str,
     mm_per_px: float,
 ) -> pd.DataFrame:
-    work = df[[x_col, y_col, metric]].copy()
-    work[metric] = _convert_metric_series(metric, work[metric], unit_mode=unit_mode, mm_per_px=mm_per_px)
-    work = work.dropna(subset=[x_col, y_col, metric])
-    if work.empty:
-        return pd.DataFrame(columns=[x_col, y_col, "value"])
+    tmp = df[[x_col, y_col, metric]].copy()
+    tmp[x_col] = pd.to_numeric(tmp[x_col], errors="coerce")
+    tmp[y_col] = pd.to_numeric(tmp[y_col], errors="coerce")
+    tmp[metric] = pd.to_numeric(tmp[metric], errors="coerce")
+    tmp = tmp.dropna(subset=[x_col, y_col])
+    tmp["value"] = convert_series_units(tmp[metric], metric, unit_mode=unit_mode, mm_per_px=mm_per_px)
 
-    if agg == "count":
-        grouped = work.groupby([y_col, x_col], dropna=True)[metric].count()
-    else:
-        grouped = getattr(work.groupby([y_col, x_col], dropna=True)[metric], agg)()
-    grid = grouped.reset_index(name="value")
-    return grid.sort_values([y_col, x_col])
+    grouped = tmp.groupby([x_col, y_col], dropna=True)["value"].agg(agg).reset_index()
+    grouped = grouped.sort_values([y_col, x_col]).reset_index(drop=True)
 
+    # Include missing integer grid positions as empty cells, so increments stay square.
+    if is_integerish(grouped[x_col]) and is_integerish(grouped[y_col]) and not grouped.empty:
+        xs = np.arange(int(np.nanmin(grouped[x_col])), int(np.nanmax(grouped[x_col])) + 1)
+        ys = np.arange(int(np.nanmin(grouped[y_col])), int(np.nanmax(grouped[y_col])) + 1)
+        full = pd.MultiIndex.from_product([xs, ys], names=[x_col, y_col]).to_frame(index=False)
+        grouped = full.merge(grouped, on=[x_col, y_col], how="left")
 
-def _pivot_grid(grid: pd.DataFrame, complete_numeric_grid: bool = False) -> pd.DataFrame:
-    if grid.empty:
-        return pd.DataFrame()
-    y_col, x_col = grid.columns[0], grid.columns[1]
-    pivot = grid.pivot(index=y_col, columns=x_col, values="value")
-    try:
-        pivot = pivot.sort_index(ascending=True).sort_index(axis=1, ascending=True)
-    except Exception:
-        pass
-    if complete_numeric_grid:
-        pivot = _complete_numeric_pivot(pivot)
-    pivot.index.name = _display_name(y_col)
-    pivot.columns.name = _display_name(x_col)
-    return pivot
-
-def _complete_numeric_pivot(pivot: pd.DataFrame) -> pd.DataFrame:
-    """Reindex integer-like axes so missing grid positions remain visible as empty cells."""
-    if pivot.empty:
-        return pivot
-    out = pivot
-    x_numeric = pd.to_numeric(pd.Index(out.columns), errors="coerce")
-    y_numeric = pd.to_numeric(pd.Index(out.index), errors="coerce")
-
-    if len(x_numeric) and np.isfinite(x_numeric).all() and _is_integer_like(x_numeric):
-        x_full = np.arange(int(np.nanmin(x_numeric)), int(np.nanmax(x_numeric)) + 1)
-        out = out.copy()
-        out.columns = x_numeric.astype(int)
-        out = out.reindex(columns=x_full)
-
-    if len(y_numeric) and np.isfinite(y_numeric).all() and _is_integer_like(y_numeric):
-        y_full = np.arange(int(np.nanmin(y_numeric)), int(np.nanmax(y_numeric)) + 1)
-        out = out.copy()
-        out.index = y_numeric.astype(int)
-        out = out.reindex(index=y_full)
-
-    return out
+    return grouped
 
 
-def _is_integer_like(values: Iterable[object]) -> bool:
-    arr = np.asarray(list(values), dtype=float)
-    arr = arr[np.isfinite(arr)]
-    if len(arr) == 0:
-        return False
-    return bool(np.allclose(arr, np.round(arr)))
+def pivot_grid(grid: pd.DataFrame) -> pd.DataFrame:
+    x_col, y_col = grid.columns[0], grid.columns[1]
+    return grid.pivot(index=y_col, columns=x_col, values="value").sort_index(ascending=True)
 
 
-def _axis_positions_ticks_and_range(values: Iterable[object]) -> tuple[list[float], list[float], list[str], list[float]]:
-    labels = list(values)
-    if not labels:
-        return [], [], [], [0.0, 1.0]
-    numeric = pd.to_numeric(pd.Series(labels), errors="coerce")
-    if numeric.notna().all():
-        positions = numeric.astype(float).tolist()
-    else:
-        positions = [float(i) for i in range(1, len(labels) + 1)]
-    tickvals = positions
-    ticktext = [_format_axis_label(v) for v in labels]
-    step = _min_positive_step(np.asarray(positions, dtype=float))
-    pad = step / 2.0
-    axis_range = [float(np.nanmin(positions) - pad), float(np.nanmax(positions) + pad)]
-    return positions, tickvals, ticktext, axis_range
-
-
-def _min_positive_step(values: np.ndarray) -> float:
-    vals = np.sort(np.unique(values[np.isfinite(values)]))
-    if len(vals) == 0:
-        return 1.0
-    # QR row/column axes are integer grid coordinates. If positions 1 and 3
-    # are present but 2 is missing, the physical grid increment is still 1.
-    if np.allclose(vals, np.round(vals)):
-        return 1.0
-    if len(vals) < 2:
-        return 1.0
-    diffs = np.diff(vals)
-    diffs = diffs[diffs > 0]
-    if len(diffs) == 0:
-        return 1.0
-    return float(np.min(diffs))
-
-
-def _format_axis_label(value: object) -> str:
-    try:
-        f = float(value)
-        if math.isfinite(f) and abs(f - round(f)) < 1e-9:
-            return str(int(round(f)))
-    except Exception:
-        pass
-    return str(value)
-
-
-def _heatmap_customdata(pivot: pd.DataFrame) -> np.ndarray:
-    data = np.empty((*pivot.shape, 2), dtype=object)
-    for yi, y_label in enumerate(pivot.index):
-        for xi, x_label in enumerate(pivot.columns):
-            data[yi, xi, 0] = _format_axis_label(x_label)
-            data[yi, xi, 1] = _format_axis_label(y_label)
-    return data
-
-
-def _square_grid_height(x_range: list[float], y_range: list[float]) -> int:
-    """Choose a figure height that preserves square cells without making tiny grids unusably small."""
-    x_span = max(abs(float(x_range[1]) - float(x_range[0])), 1.0)
-    y_span = max(abs(float(y_range[1]) - float(y_range[0])), 1.0)
-    # Approximate the available Streamlit column width. The scaleanchor keeps cells square;
-    # this height mainly controls how much vertical space the rectangular grid receives.
-    nominal_width_px = 760.0
-    height = int(nominal_width_px * y_span / x_span + 140)
-    return max(420, min(height, 1600))
-
-
-def _unique_axis_ticks(numeric_values: pd.Series, labels: pd.Series) -> tuple[list[float], list[str]]:
-    tmp = pd.DataFrame({"pos": pd.to_numeric(numeric_values, errors="coerce"), "label": labels.astype(str)})
-    tmp = tmp.dropna(subset=["pos"]).drop_duplicates(subset=["pos"]).sort_values("pos")
-    return tmp["pos"].astype(float).tolist(), tmp["label"].tolist()
-
-
-def _square_scene_aspect(x_values: pd.Series, y_values: pd.Series, heights: np.ndarray) -> dict[str, float]:
-    """Set a normalized 3D scene aspect so x/y grid increments remain square.
-
-    Plotly's manual aspect ratio behaves better when ratios are normalized.
-    Returning raw spans, for example x=23 and y=4, can make the initial
-    orthographic camera appear badly zoomed or clipped on some screens.
-    """
-    x_span = _axis_span_with_padding(x_values)
-    y_span = _axis_span_with_padding(y_values)
-    z_span = float(np.nanmax(np.abs(heights[np.isfinite(heights)]))) if np.isfinite(heights).any() else 1.0
-    z_span = max(z_span, max(x_span, y_span) * 0.04)
-    max_span = max(x_span, y_span, z_span, 1.0)
-    return {
-        "x": float(x_span / max_span),
-        "y": float(y_span / max_span),
-        "z": float(z_span / max_span),
-    }
-
-
-def _axis_span_with_padding(values: pd.Series) -> float:
-    vals = pd.to_numeric(values, errors="coerce").dropna().astype(float).to_numpy()
-    if len(vals) == 0:
-        return 1.0
-    step = _min_positive_step(vals)
-    return float(max(np.nanmax(vals) - np.nanmin(vals) + step, step))
-
-
-def _numeric_axis_range_with_padding(values: pd.Series, extra_pad_steps: float = 0.65) -> list[float]:
-    """Axis range centered around all bars, with enough room to see the edge bars."""
-    vals = pd.to_numeric(values, errors="coerce").dropna().astype(float).to_numpy()
-    if len(vals) == 0:
-        return [0.0, 1.0]
-    step = _min_positive_step(vals)
-    pad = step * float(extra_pad_steps)
-    return [float(np.nanmin(vals) - pad), float(np.nanmax(vals) + pad)]
-
-
-def _numeric_z_range_with_padding(heights: np.ndarray) -> list[float]:
-    vals = np.asarray(heights, dtype=float)
-    vals = vals[np.isfinite(vals)]
-    if len(vals) == 0:
-        return [0.0, 1.0]
-    z_min = min(0.0, float(np.nanmin(vals)))
-    z_max = max(0.0, float(np.nanmax(vals)))
-    span = max(z_max - z_min, 1.0)
-    return [z_min - 0.05 * span, z_max + 0.18 * span]
-
-
-
-def _make_heatmap_figure(grid: pd.DataFrame, x_col: str, y_col: str, metric: str, metric_label: str) -> go.Figure:
-    pivot = _pivot_grid(grid, complete_numeric_grid=True)
-    if pivot.empty:
-        return _empty_figure("No data for current filters")
-
-    x_pos, x_tickvals, x_ticktext, x_range = _axis_positions_ticks_and_range(pivot.columns)
-    y_pos, y_tickvals, y_ticktext, y_range = _axis_positions_ticks_and_range(pivot.index)
-
-    colorscale = _colorscale_for_metric(metric)
+def make_heatmap(grid: pd.DataFrame, *, x_col: str, y_col: str, metric: str, metric_label: str) -> go.Figure:
+    pivot = pivot_grid(grid)
+    color_scale = color_scale_for(metric)
     fig = go.Figure(
         data=go.Heatmap(
             z=pivot.values,
-            x=x_pos,
-            y=y_pos,
-            colorscale=colorscale,
-            colorbar=dict(title=metric_label),
-            hovertemplate=(
-                f"{_display_name(x_col)}=%{{customdata[0]}}<br>"
-                f"{_display_name(y_col)}=%{{customdata[1]}}<br>"
-                f"{metric_label}=%{{z:.3g}}<extra></extra>"
-            ),
-            customdata=_heatmap_customdata(pivot),
+            x=pivot.columns.tolist(),
+            y=pivot.index.tolist(),
+            colorscale=color_scale,
+            colorbar={"title": metric_label},
+            hovertemplate=f"{display_name(x_col)}=%{{x}}<br>{display_name(y_col)}=%{{y}}<br>{metric_label}=%{{z:.4g}}<extra></extra>",
         )
     )
-    # Numeric plotting coordinates plus scaleanchor enforce square grid increments.
-    # Therefore a 4 x 23 plate is drawn as a tall 4 x 23 grid, not stretched
-    # to fill a square plotting box.
     fig.update_layout(
-        title=f"{metric_label} by {_display_name(x_col)} and {_display_name(y_col)}",
-        xaxis=dict(
-            title=_display_name(x_col),
-            tickmode="array",
-            tickvals=x_tickvals,
-            ticktext=x_ticktext,
-            range=x_range,
-            constrain="domain",
-        ),
-        yaxis=dict(
-            title=_display_name(y_col),
-            tickmode="array",
-            tickvals=y_tickvals,
-            ticktext=y_ticktext,
-            range=[y_range[1], y_range[0]],
-            scaleanchor="x",
-            scaleratio=1,
-            constrain="domain",
-        ),
-        height=_square_grid_height(x_range, y_range),
-        margin=dict(l=40, r=20, t=60, b=40),
+        title=f"{metric_label} by {display_name(x_col)} and {display_name(y_col)}",
+        xaxis_title=display_name(x_col),
+        yaxis_title=display_name(y_col),
+        height=760,
+        margin=dict(l=40, r=40, t=60, b=40),
     )
+    fig.update_xaxes(dtick=1, constrain="domain")
+    fig.update_yaxes(dtick=1, scaleanchor="x", scaleratio=1, autorange="reversed")
     return fig
 
 
-def _make_3d_bar_figure(
+def make_3d_bars(
     grid: pd.DataFrame,
+    *,
     x_col: str,
     y_col: str,
     metric: str,
     metric_label: str,
-    z_scale: str,
-    z_height_fraction: float,
+    z_transform: str,
+    max_height: float,
 ) -> go.Figure:
-    if grid.empty:
-        return _empty_figure("No data for current filters")
+    data = grid.dropna(subset=["value"]).copy()
+    fig = go.Figure()
+    if data.empty:
+        fig.update_layout(title="No values to plot")
+        return fig
 
-    grid = grid.copy()
-    grid["x_num"] = _axis_to_numeric(grid[x_col])
-    grid["y_num"] = _axis_to_numeric(grid[y_col])
-    grid = grid.dropna(subset=["x_num", "y_num", "value"])
-    if grid.empty:
-        return _empty_figure("No finite grid values for current filters")
+    xs = pd.to_numeric(data[x_col], errors="coerce").to_numpy(dtype=float)
+    ys = pd.to_numeric(data[y_col], errors="coerce").to_numpy(dtype=float)
+    values = pd.to_numeric(data["value"], errors="coerce").to_numpy(dtype=float)
 
-    raw_values = grid["value"].astype(float).to_numpy()
-    transformed = _scale_heights(raw_values, z_scale)
-    heights = _normalize_heights(transformed, grid["x_num"], grid["y_num"], z_height_fraction)
-    if np.all(~np.isfinite(heights)):
-        return _empty_figure("No finite values after height scaling")
+    finite = np.isfinite(xs) & np.isfinite(ys) & np.isfinite(values)
+    xs, ys, values = xs[finite], ys[finite], values[finite]
+    if len(values) == 0:
+        fig.update_layout(title="No finite values to plot")
+        return fig
 
-    x_width = _bar_width(grid["x_num"])
-    y_width = _bar_width(grid["y_num"])
-    x, y, z, i, j, k, intensity = _cuboid_mesh(
-        grid["x_num"].to_numpy(float),
-        grid["y_num"].to_numpy(float),
-        heights,
-        raw_values,
-        x_width=x_width,
-        y_width=y_width,
-    )
+    z_vis = transform_values_for_height(values, z_transform)
+    z_vis = np.clip(z_vis, 0, None)
+    z_span = float(np.nanmax(z_vis)) if np.nanmax(z_vis) > 0 else 1.0
 
-    colorscale = _colorscale_for_metric(metric)
-    fig = go.Figure(
-        data=go.Mesh3d(
-            x=x,
-            y=y,
-            z=z,
-            i=i,
-            j=j,
-            k=k,
-            intensity=intensity,
-            colorscale=colorscale,
-            colorbar=dict(title=metric_label),
-            flatshading=True,
-            opacity=0.95,
-            hoverinfo="skip",
-        )
-    )
+    x_extent = max(float(np.nanmax(xs) - np.nanmin(xs) + 1), 1.0)
+    y_extent = max(float(np.nanmax(ys) - np.nanmin(ys) + 1), 1.0)
+    grid_footprint = max(x_extent, y_extent)
+    heights = z_vis / z_span * (max_height * grid_footprint)
 
-    # Add a small text layer so values remain readable when the camera is top-down.
-    fig.add_trace(
-        go.Scatter3d(
-            x=grid["x_num"],
-            y=grid["y_num"],
-            z=np.maximum(heights, 0) + _label_lift(heights),
-            mode="text",
-            text=[_short_number(v) for v in raw_values],
-            textposition="middle center",
-            hovertemplate=(
-                f"{_display_name(x_col)}=%{{customdata[0]}}<br>"
-                f"{_display_name(y_col)}=%{{customdata[1]}}<br>"
-                f"{metric_label}=%{{customdata[2]:.4g}}<extra></extra>"
-            ),
-            customdata=np.column_stack([grid[x_col].astype(str), grid[y_col].astype(str), raw_values]),
-            showlegend=False,
-        )
-    )
+    vmin, vmax = float(np.nanmin(values)), float(np.nanmax(values))
+    cscale = color_scale_for(metric)
 
-    x_tickvals, x_ticktext = _unique_axis_ticks(grid["x_num"], grid[x_col])
-    y_tickvals, y_ticktext = _unique_axis_ticks(grid["y_num"], grid[y_col])
-    aspect = _square_scene_aspect(grid["x_num"], grid["y_num"], heights)
+    for x, y, value, height in zip(xs, ys, values, heights):
+        color_value = 0.5 if vmax == vmin else (value - vmin) / (vmax - vmin)
+        color = sample_plotly_color(cscale, color_value)
+        add_box(fig, x=x, y=y, z0=0.0, dz=float(height), color=color, opacity=0.92)
 
+    # Add invisible anchors to force full centered view.
+    xmin, xmax = float(np.nanmin(xs) - 0.75), float(np.nanmax(xs) + 0.75)
+    ymin, ymax = float(np.nanmin(ys) - 0.75), float(np.nanmax(ys) + 0.75)
+    zmax = max(float(np.nanmax(heights)) * 1.10, 1.0)
+    fig.add_trace(go.Scatter3d(
+        x=[xmin, xmax], y=[ymin, ymax], z=[0, zmax], mode="markers",
+        marker=dict(size=1, opacity=0), showlegend=False, hoverinfo="skip"
+    ))
+
+    max_xy = max(x_extent, y_extent, 1.0)
     fig.update_layout(
-        title=f"{metric_label} by {_display_name(x_col)} and {_display_name(y_col)}",
-        height=760,
-        scene=dict(
-            xaxis=dict(
-                title=_display_name(x_col),
-                tickmode="array",
-                tickvals=x_tickvals,
-                ticktext=x_ticktext,
-                range=_numeric_axis_range_with_padding(grid["x_num"]),
-            ),
-            yaxis=dict(
-                title=_display_name(y_col),
-                tickmode="array",
-                tickvals=y_tickvals,
-                ticktext=y_ticktext,
-                range=_numeric_axis_range_with_padding(grid["y_num"]),
-            ),
-            zaxis=dict(
-                title=f"{metric_label} display height",
-                range=_numeric_z_range_with_padding(heights),
-            ),
-            camera=dict(
-                eye=dict(x=0.001, y=0.001, z=3.8),
-                center=dict(x=0, y=0, z=0),
-                up=dict(x=0, y=1, z=0),
-                projection=dict(type="orthographic"),
-            ),
-            aspectmode="manual",
-            aspectratio=aspect,
-        ),
+        title=f"{metric_label} by {display_name(x_col)} and {display_name(y_col)}",
+        height=820,
         margin=dict(l=0, r=0, t=60, b=0),
+        scene=dict(
+            xaxis=dict(title=display_name(x_col), range=[xmin, xmax], dtick=1),
+            yaxis=dict(title=display_name(y_col), range=[ymin, ymax], dtick=1),
+            zaxis=dict(title="Visual height", range=[0, zmax]),
+            aspectmode="manual",
+            aspectratio=dict(x=x_extent / max_xy, y=y_extent / max_xy, z=max_height),
+            camera=dict(
+                projection=dict(type="orthographic"),
+                eye=dict(x=0.0, y=0.0, z=2.8),
+                center=dict(x=0.0, y=0.0, z=0.0),
+                up=dict(x=0.0, y=1.0, z=0.0),
+            ),
+        ),
     )
     return fig
 
 
-def _axis_to_numeric(series: pd.Series) -> pd.Series:
-    numeric = pd.to_numeric(series, errors="coerce")
-    if numeric.notna().all():
-        return numeric
-    categories = {value: idx for idx, value in enumerate(_sorted_options(series), start=1)}
-    return series.map(categories).astype(float)
+def add_box(fig: go.Figure, *, x: float, y: float, z0: float, dz: float, color: str, opacity: float) -> None:
+    half = 0.42
+    z1 = max(z0 + dz, z0 + 0.01)
+    vx = [x-half, x+half, x+half, x-half, x-half, x+half, x+half, x-half]
+    vy = [y-half, y-half, y+half, y+half, y-half, y-half, y+half, y+half]
+    vz = [z0, z0, z0, z0, z1, z1, z1, z1]
+    faces_i = [0, 0, 0, 4, 4, 4, 0, 1, 2, 3, 0, 3]
+    faces_j = [1, 2, 3, 5, 6, 7, 4, 5, 6, 7, 1, 2]
+    faces_k = [2, 3, 0, 6, 7, 4, 5, 6, 7, 4, 5, 6]
+    fig.add_trace(go.Mesh3d(
+        x=vx, y=vy, z=vz,
+        i=faces_i, j=faces_j, k=faces_k,
+        color=color,
+        opacity=opacity,
+        flatshading=True,
+        hoverinfo="skip",
+        showscale=False,
+    ))
 
 
-def _bar_width(values: pd.Series) -> float:
-    unique = np.sort(pd.to_numeric(values, errors="coerce").dropna().unique())
-    if len(unique) == 0:
-        return 0.65
-    return float(_min_positive_step(unique) * 0.72)
-
-
-def _scale_heights(values: np.ndarray, mode: str) -> np.ndarray:
-    values = np.asarray(values, dtype=float)
+def transform_values_for_height(values: np.ndarray, mode: str) -> np.ndarray:
+    values = values.astype(float)
+    min_value = np.nanmin(values)
+    shifted = values - min(0.0, min_value)
     if mode == "sqrt":
-        return np.sign(values) * np.sqrt(np.abs(values))
+        return np.sqrt(np.clip(shifted, 0, None))
     if mode == "log1p":
-        return np.sign(values) * np.log1p(np.abs(values))
-    return values
+        return np.log1p(np.clip(shifted, 0, None))
+    return shifted
 
 
-def _normalize_heights(values: np.ndarray, x_values: pd.Series, y_values: pd.Series, height_fraction: float) -> np.ndarray:
-    """Normalize visual 3D heights so large count/length values do not dominate the scene geometry."""
-    values = np.asarray(values, dtype=float)
-    out = np.full_like(values, np.nan, dtype=float)
-    finite = np.isfinite(values)
-    if not finite.any():
-        return out
-
-    vmax = float(np.nanmax(np.abs(values[finite])))
-    if vmax <= 0:
-        out[finite] = 0.0
-        return out
-
-    x_range = _axis_range(x_values)
-    y_range = _axis_range(y_values)
-    grid_footprint = max(x_range, y_range, 1.0)
-    max_display_height = grid_footprint * float(height_fraction)
-    out[finite] = values[finite] / vmax * max_display_height
-    return out
-
-
-def _axis_range(values: pd.Series) -> float:
-    vals = pd.to_numeric(values, errors="coerce").dropna().astype(float)
-    if vals.empty:
-        return 1.0
-    return float(max(vals.max() - vals.min(), 1.0))
-
-
-def _cuboid_mesh(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    heights: np.ndarray,
-    raw_values: np.ndarray,
-    x_width: float,
-    y_width: float,
-) -> tuple[list[float], list[float], list[float], list[int], list[int], list[int], list[float]]:
-    vertices_x: list[float] = []
-    vertices_y: list[float] = []
-    vertices_z: list[float] = []
-    intensity: list[float] = []
-    ii: list[int] = []
-    jj: list[int] = []
-    kk: list[int] = []
-
-    faces = [
-        (0, 1, 2), (0, 2, 3),
-        (4, 5, 6), (4, 6, 7),
-        (0, 1, 5), (0, 5, 4),
-        (1, 2, 6), (1, 6, 5),
-        (2, 3, 7), (2, 7, 6),
-        (3, 0, 4), (3, 4, 7),
-    ]
-
-    for x0, y0, h, raw in zip(xs, ys, heights, raw_values):
-        if not np.isfinite(x0) or not np.isfinite(y0) or not np.isfinite(h):
-            continue
-        z0, z1 = (0.0, float(h)) if h >= 0 else (float(h), 0.0)
-        x_left, x_right = float(x0 - x_width / 2), float(x0 + x_width / 2)
-        y_front, y_back = float(y0 - y_width / 2), float(y0 + y_width / 2)
-        base = len(vertices_x)
-        cube = [
-            (x_left, y_front, z0),
-            (x_right, y_front, z0),
-            (x_right, y_back, z0),
-            (x_left, y_back, z0),
-            (x_left, y_front, z1),
-            (x_right, y_front, z1),
-            (x_right, y_back, z1),
-            (x_left, y_back, z1),
-        ]
-        for vx, vy, vz in cube:
-            vertices_x.append(vx)
-            vertices_y.append(vy)
-            vertices_z.append(vz)
-            intensity.append(float(raw))
-        for a, b, c in faces:
-            ii.append(base + a)
-            jj.append(base + b)
-            kk.append(base + c)
-
-    return vertices_x, vertices_y, vertices_z, ii, jj, kk, intensity
-
-
-def _label_lift(heights: np.ndarray) -> float:
-    finite = np.abs(heights[np.isfinite(heights)])
-    if len(finite) == 0:
-        return 0.1
-    return float(max(np.nanmax(finite) * 0.025, 0.1))
-
-
-def _colorscale_for_metric(metric: str) -> str:
+def color_scale_for(metric: str) -> str:
     lower = metric.lower()
     for key, scale in METRIC_COLOR_SCALES.items():
         if key in lower:
@@ -782,98 +507,98 @@ def _colorscale_for_metric(metric: str) -> str:
     return "Viridis"
 
 
-def _metric_unit_exponent(metric: object) -> int:
-    """Return 1 for pixel length metrics, 2 for pixel area metrics, 0 for non-spatial metrics."""
-    name = str(metric).lower()
-    if name.endswith("_area_px") or name.endswith("area_px"):
+def sample_plotly_color(colorscale: str, t: float) -> str:
+    # Small dependency-free approximation of Plotly scale sampling.
+    # It is sufficient for per-bar colors in this lightweight app.
+    palettes = {
+        "Viridis": [(68, 1, 84), (59, 82, 139), (33, 145, 140), (94, 201, 98), (253, 231, 37)],
+        "Cividis": [(0, 34, 78), (40, 99, 129), (115, 137, 117), (188, 174, 97), (253, 234, 69)],
+        "YlOrBr": [(255, 255, 212), (254, 217, 142), (254, 153, 41), (217, 95, 14), (153, 52, 4)],
+        "Plasma": [(13, 8, 135), (126, 3, 168), (203, 71, 119), (248, 149, 64), (240, 249, 33)],
+        "Turbo": [(48, 18, 59), (43, 117, 231), (56, 204, 92), (255, 196, 56), (122, 4, 3)],
+        "Greens": [(237, 248, 233), (186, 228, 179), (116, 196, 118), (49, 163, 84), (0, 109, 44)],
+        "Blues": [(239, 243, 255), (189, 215, 231), (107, 174, 214), (33, 113, 181), (8, 48, 107)],
+        "Magma": [(0, 0, 4), (80, 18, 123), (182, 55, 121), (251, 136, 97), (252, 253, 191)],
+        "Reds": [(254, 229, 217), (252, 174, 145), (251, 106, 74), (222, 45, 38), (165, 15, 21)],
+    }
+    pts = palettes.get(colorscale, palettes["Viridis"])
+    t = float(np.clip(t, 0, 1))
+    pos = t * (len(pts) - 1)
+    i = int(np.floor(pos))
+    j = min(i + 1, len(pts) - 1)
+    f = pos - i
+    rgb = tuple(int(round((1 - f) * pts[i][k] + f * pts[j][k])) for k in range(3))
+    return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
+
+
+def convert_series_units(s: pd.Series, metric: str, *, unit_mode: str, mm_per_px: float) -> pd.Series:
+    values = pd.to_numeric(s, errors="coerce")
+    if unit_mode != "metric":
+        return values
+    exponent = metric_unit_exponent(metric)
+    if exponent == 1:
+        return values * mm_per_px
+    if exponent == 2:
+        return values * (mm_per_px ** 2)
+    return values
+
+
+def convert_dataframe_units(df: pd.DataFrame, *, unit_mode: str, mm_per_px: float) -> pd.DataFrame:
+    out = df.copy()
+    if unit_mode != "metric":
+        return out
+    for col in out.columns:
+        if pd.api.types.is_numeric_dtype(out[col]):
+            out[col] = convert_series_units(out[col], col, unit_mode=unit_mode, mm_per_px=mm_per_px)
+    return out
+
+
+def metric_unit_exponent(metric: str) -> int:
+    lower = metric.lower()
+    if "area" in lower and ("px" in lower or lower.endswith("area")):
         return 2
-    if name.endswith("_px"):
-        spatial_terms = ("length", "axis_major", "axis_minor", "perimeter", "diameter", "width", "height")
-        if any(term in name for term in spatial_terms):
-            return 1
+    length_terms = ["length", "perimeter", "axis", "diameter", "radius", "width", "height"]
+    if any(term in lower for term in length_terms) and "px" in lower:
+        return 1
     return 0
 
 
-def _convert_metric_series(metric: object, values: pd.Series, unit_mode: str, mm_per_px: float) -> pd.Series:
-    numeric = pd.to_numeric(values, errors="coerce")
-    exponent = _metric_unit_exponent(metric)
-    if unit_mode == "metric" and exponent > 0:
-        return numeric * (float(mm_per_px) ** exponent)
-    return numeric
-
-
-def _convert_dataframe_units(df: pd.DataFrame, unit_mode: str, mm_per_px: float) -> pd.DataFrame:
-    if unit_mode != "metric":
-        return df
-    out = df.copy()
-    for col in out.columns:
-        if _metric_unit_exponent(col) > 0 and pd.api.types.is_numeric_dtype(out[col]):
-            out[col] = _convert_metric_series(col, out[col], unit_mode=unit_mode, mm_per_px=mm_per_px)
-    return out
-
-
-def _display_name(column: object, unit_mode: str = "pixels") -> str:
-    text = str(column)
-    exponent = _metric_unit_exponent(text)
-    label = DISPLAY_NAMES.get(text)
-    if label is None:
-        label = text.replace("qr_", "QR ").replace("_", " ").title()
-        if exponent == 2:
-            label = label.removesuffix(" Px") + " (px²)"
-        elif exponent == 1:
-            label = label.removesuffix(" Px") + " (px)"
+def display_name(col: str, unit_mode: str | None = None) -> str:
+    name = DISPLAY_NAMES.get(col, col.replace("_", " ").strip().title())
     if unit_mode == "metric":
+        exponent = metric_unit_exponent(col)
+        if exponent == 1:
+            return name.replace("(px)", "(mm)")
         if exponent == 2:
-            label = label.replace("(px²)", "(mm²)").replace("(px^2)", "(mm²)")
-        elif exponent == 1:
-            label = label.replace("(px)", "(mm)")
-    return label
+            return name.replace("(px²)", "(mm²)")
+    return name
 
 
-def _rename_for_display(df: pd.DataFrame, unit_mode: str = "pixels") -> pd.DataFrame:
-    return df.rename(columns={col: _display_name(col, unit_mode) for col in df.columns})
+def rename_for_display(df: pd.DataFrame, *, unit_mode: str) -> pd.DataFrame:
+    return df.rename(columns={c: display_name(c, unit_mode=unit_mode) for c in df.columns})
 
 
-def _unique_existing_columns(candidates: list[str], existing_columns: Iterable[str]) -> list[str]:
-    existing = set(existing_columns)
-    seen: set[str] = set()
-    out: list[str] = []
-    for col in candidates:
-        if col in existing and col not in seen:
-            out.append(col)
-            seen.add(col)
-    return out
-
-
-def _pretty_metric(metric: str, unit_mode: str = "pixels") -> str:
-    return _display_name(metric, unit_mode)
-
-
-def _short_number(value: float) -> str:
-    if not np.isfinite(value):
-        return ""
-    if abs(value) >= 1000:
-        return f"{value:.2g}"
-    if abs(value - round(value)) < 1e-9:
-        return f"{int(round(value))}"
-    return f"{value:.2f}".rstrip("0").rstrip(".")
-
-
-def _empty_figure(message: str) -> go.Figure:
-    fig = go.Figure()
-    fig.update_layout(
-        annotations=[dict(text=message, showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")],
-        height=500,
-    )
-    return fig
-
-
-def _index_or_zero(options: Iterable[object], value: object) -> int:
-    options = list(options)
+def index_or_zero(items: list[str], wanted: str) -> int:
     try:
-        return options.index(value)
+        return items.index(wanted)
     except ValueError:
         return 0
+
+
+def unique_existing_columns(wanted: Iterable[str], columns: Iterable[str]) -> list[str]:
+    colset = set(columns)
+    out = []
+    for col in wanted:
+        if col in colset and col not in out:
+            out.append(col)
+    return out
+
+
+def is_integerish(s: pd.Series) -> bool:
+    vals = pd.to_numeric(s, errors="coerce").dropna()
+    if vals.empty:
+        return False
+    return bool(np.all(np.isclose(vals, np.round(vals))))
 
 
 if __name__ == "__main__":
