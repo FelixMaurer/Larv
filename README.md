@@ -1,37 +1,21 @@
 # Larvae QR Grid Explorer
 
-Minimal flat Streamlit app for GitHub / Streamlit Community Cloud.
+Minimal flat Streamlit app for GitHub/Streamlit Community Cloud.
 
-## Required repository layout
+Files required in the repository root:
 
-Put these files in the root of the GitHub repository:
-
-```text
+```
 streamlit_app.py
 requirements.txt
-image_summary.parquet   # preferred
-images.parquet          # optional
-worms.parquet           # optional, kept for compatibility with existing export name
-manifest.json           # optional
+image_summary.parquet
+images.parquet
+worms.parquet
+manifest.json
 ```
 
-CSV fallbacks are supported if parquet files are absent:
+The app automatically repairs QR metadata from `qr_text` or `qr_raw`, including QR strings with optional suffixes after the numeric sample ID, for example `Plot72_Spalte2_Reihe12_R4S_197_S`.
 
-```text
-image_summary.csv
-images.csv
-worms.csv
-```
-
-## Deploy on Streamlit Community Cloud
-
-1. Push the files to GitHub.
-2. Go to Streamlit Community Cloud.
-3. Create a new app from the GitHub repository.
-4. Use `streamlit_app.py` as the entrypoint file.
-5. Deploy.
-
-## Local run
+Run locally:
 
 ```bash
 pip install -r requirements.txt
