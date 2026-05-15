@@ -15,5 +15,8 @@
   "coordinate_scale": "working_pixels",
   "scale_factor_values": [
     0.5
-  ]
+  ],
+  "n_grid_assigned_images_after_relaxed_qr_parse": 82,
+  "n_occupied_grid_cells_after_relaxed_qr_parse": 43,
+  "qr_parser_note": "Relaxed parser accepts optional suffixes after numeric sample ID, e.g. Plot72_Spalte2_Reihe12_R4S_197_S."
 }
