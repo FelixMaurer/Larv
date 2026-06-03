@@ -1,6 +1,6 @@
 {
-  "segmentation_out": "/mnt/f/worm_segmentation_260531/cellpose_repo_container_v8_performance/cellpose_repo_container_v8_performance/output_ai_04_small_rescue-1",
-  "db_dir": "/mnt/f/worm_segmentation_260531/cellpose_repo_container_v8_performance/cellpose_repo_container_v8_performance/data/worm_database",
+  "segmentation_out": "/mnt/f/worm_segmentation_260603/output_ai_04_small_rescue-1",
+  "db_dir": "/mnt/f/worm_segmentation_260603/data/worm_database",
   "tables": {
     "images_csv": "data/worm_database/images.csv",
     "images_parquet": "data/worm_database/images.parquet",
@@ -9,9 +9,9 @@
     "image_summary_csv": "data/worm_database/image_summary.csv",
     "image_summary_parquet": "data/worm_database/image_summary.parquet"
   },
-  "n_images": 362,
-  "n_worms": 19895,
-  "n_image_summary_rows": 362,
+  "n_images": 436,
+  "n_worms": 22483,
+  "n_image_summary_rows": 436,
   "coordinate_scale": "working_pixels",
   "scale_factor_values": [
     0.5
