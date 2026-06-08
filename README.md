@@ -61,3 +61,11 @@ The most important field is `plant_weight_kg`, derived from the source `weight` 
 In the Streamlit sidebar, enable **Normalize larva counts by plant weight** to make the global `count` metric behave as larvae per kg plant weight for maps, trend analysis and clustering. Absolute counts are retained as `count_absolute`, and explicit derived columns such as `count_per_kg_plant_weight` and `count_per_plant` remain available.
 
 The QC / missing tab contains a **Plant weights** section showing analyzed images without matched plant weights and expected parcel metadata rows without a matching analyzed image.
+
+
+## Fix: plant-weight normalization table display
+
+This version includes a safety guard for Streamlit/PyArrow dataframe rendering.
+When plant-weight normalization is enabled, several count-like columns can have
+similar human-readable labels. The app now keeps display column names unique,
+so the Rows/QC tables no longer crash with `Duplicate column names found`.

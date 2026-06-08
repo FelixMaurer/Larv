@@ -58,6 +58,8 @@ DISPLAY_NAMES = {
     "plant_weight_kg": "Plant weight (kg)",
     "n_plants": "Number of plants",
     "plant_weight_per_plant_g": "Plant weight per plant (g)",
+    "larvae_in_tray_manual": "Manual larvae/tray note",
+    "plot_trap_disassemble": "Plot/trap disassembly note",
     "parcel_weight_match": "Plant-weight metadata matched",
     "parcel_r4s": "Parcel R4S/sample ID",
     "parcel_plot": "Parcel plot",
@@ -76,6 +78,9 @@ METRIC_COLOR_SCALES = {
     "perimeter": "Blues",
     "raw": "Magma",
     "rejected": "Reds",
+    "plant": "Greens",
+    "weight": "Greens",
+    "n_plants": "Teal",
 }
 
 QR_RE = re.compile(
@@ -243,8 +248,8 @@ def main() -> None:
             "They remain in the total image and larva counts, but are omitted from the grid plots."
         )
 
-    tab_map, tab_3d, tab_table, tab_rows, tab_trend, tab_cluster, tab_qc = st.tabs(
-        ["2D map", "3D bars", "Counter grid", "Rows", "Trend analysis", "Clustering", "QC / missing"]
+    tab_map, tab_3d, tab_table, tab_rows, tab_metadata, tab_trend, tab_cluster, tab_qc = st.tabs(
+        ["2D map", "3D bars", "Counter grid", "Rows", "Metadata maps", "Trend analysis", "Clustering", "QC / missing"]
     )
 
     with tab_map:
@@ -292,6 +297,17 @@ def main() -> None:
             rows_df.to_csv(index=False).encode("utf-8"),
             file_name="filtered_image_summary.csv",
             mime="text/csv",
+        )
+
+    with tab_metadata:
+        render_metadata_maps(
+            filtered_for_analysis,
+            x_col=x_col,
+            y_col=y_col,
+            unit_mode=unit_mode,
+            mm_per_px=mm_per_px,
+            z_scale=z_scale,
+            z_height_fraction=z_height_fraction,
         )
 
     with tab_trend:
@@ -573,7 +589,10 @@ def metric_columns(df: pd.DataFrame, exclude: set[str]) -> list[str]:
         "count_per_kg_plant_weight",
         "count_per_plant",
         "plant_weight_kg",
+        "plant_weight_g",
         "n_plants",
+        "plant_weight_per_plant_g",
+        "larvae_in_tray_manual",
         "mean_skeleton_length_px",
         "median_skeleton_length_px",
         "mean_axis_major_px",
@@ -984,7 +1003,54 @@ def display_name(column: object, unit_mode: str = "pixels") -> str:
 
 
 def rename_for_display(df: pd.DataFrame, unit_mode: str = "pixels") -> pd.DataFrame:
-    return df.rename(columns={col: display_name(col, unit_mode) for col in df.columns})
+    """Rename columns to human-readable labels and keep Arrow/Streamlit-safe uniqueness.
+
+    Streamlit sends dataframes through PyArrow. PyArrow rejects duplicate column
+    names, which can happen after display renaming; for example, when global
+    plant-weight normalization is enabled both `count` and
+    `count_per_kg_plant_weight` can naturally display as larvae/kg. We keep the
+    nice labels but append the original source column when needed.
+    """
+    labels = [display_name(col, unit_mode) for col in df.columns]
+    unique_labels = make_unique_display_columns(labels, [str(c) for c in df.columns])
+    out = df.copy()
+    out.columns = unique_labels
+    return out
+
+
+def make_unique_display_columns(labels: Iterable[str], source_columns: Iterable[str] | None = None) -> list[str]:
+    """Return display labels with no duplicates, preserving order.
+
+    Duplicate display labels are disambiguated with the original source column
+    name when available, otherwise with a numeric suffix. This prevents
+    `ValueError: Duplicate column names found` in `st.dataframe`.
+    """
+    labels_list = [str(x) for x in labels]
+    source_list = [str(x) for x in source_columns] if source_columns is not None else [""] * len(labels_list)
+
+    counts: dict[str, int] = {}
+    for label in labels_list:
+        counts[label] = counts.get(label, 0) + 1
+
+    seen: dict[str, int] = {}
+    used: set[str] = set()
+    out: list[str] = []
+    for label, source in zip(labels_list, source_list):
+        seen[label] = seen.get(label, 0) + 1
+        if counts[label] == 1 and label not in used:
+            candidate = label
+        else:
+            source_suffix = source if source else str(seen[label])
+            candidate = f"{label} [{source_suffix}]"
+        if candidate in used:
+            base = candidate
+            idx = 2
+            while f"{base}.{idx}" in used:
+                idx += 1
+            candidate = f"{base}.{idx}"
+        out.append(candidate)
+        used.add(candidate)
+    return out
 
 
 def unique_existing_columns(candidates: list[str], existing_columns: Iterable[str]) -> list[str]:
@@ -1014,15 +1080,175 @@ def empty_figure(message: str) -> go.Figure:
     return fig
 
 
-def render_trend_analysis(df: pd.DataFrame, metric_cols: list[str], default_metric: str, unit_mode: str, mm_per_px: float) -> None:
-    st.subheader("Trend analysis")
-    st.caption("Aggregate the selected metric along a row/column/sample axis and fit simple linear trends. This is intended as a quick check for spatial gradients across the grid.")
+
+def metadata_metric_columns(df: pd.DataFrame) -> list[str]:
+    """Return numeric parcel/metadata columns that are meaningful as maps/trends."""
+    preferred = [
+        "plant_weight_kg",
+        "plant_weight_g",
+        "n_plants",
+        "plant_weight_per_plant_g",
+        "count_per_kg_plant_weight",
+        "count_per_plant",
+        "parcel_weight_match",
+    ]
+    candidates: list[str] = []
+    for col in preferred:
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+            candidates.append(col)
+    metadata_keywords = (
+        "plant_weight", "n_plants", "parcel_weight", "manual", "tray", "plot_trap",
+        "pixel_scale", "qr_bbox_width", "qr_bbox_height", "qr_side_mean",
+    )
+    blocked = {"qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id", "parcel_plot", "parcel_spalte", "parcel_reihe", "parcel_r4s"}
+    for col in df.columns:
+        lower = str(col).lower()
+        if col in blocked or col in candidates:
+            continue
+        if any(key in lower for key in metadata_keywords) and pd.api.types.is_numeric_dtype(df[col]):
+            candidates.append(col)
+    return candidates
+
+
+def render_metadata_maps(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    unit_mode: str,
+    mm_per_px: float,
+    z_scale: str,
+    z_height_fraction: float,
+) -> None:
+    st.subheader("Metadata maps")
+    st.caption(
+        "Map and trend parcel metadata, especially plant weight, across the row/column grid. "
+        "These variables can also be selected in the normal Trend analysis and Clustering tabs."
+    )
     if df.empty:
         st.warning("No rows remain after filters.")
         return
 
-    axis_candidates = [c for c in ["qr_reihe", "qr_spalte", "qr_plot", "qr_sample_id"] if c in df.columns]
-    axis_candidates += [c for c in df.columns if c.startswith("qr_") and c not in axis_candidates and pd.api.types.is_numeric_dtype(df[c])]
+    meta_cols = metadata_metric_columns(df)
+    if not meta_cols:
+        st.info("No numeric parcel metadata columns are available. Add or check `parcel_metadata.csv` in the app root.")
+        return
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        default_meta = "plant_weight_kg" if "plant_weight_kg" in meta_cols else meta_cols[0]
+        meta_metric = st.selectbox(
+            "Metadata variable",
+            meta_cols,
+            index=index_or_zero(meta_cols, default_meta),
+            format_func=lambda c: display_name(c, unit_mode),
+            key="metadata_map_metric",
+        )
+    with c2:
+        agg = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "count"], index=0, key="metadata_map_agg")
+    with c3:
+        use_qr_grid = st.checkbox("Force QR row/column axes", value=True, key="metadata_map_force_qr")
+
+    map_x = "qr_reihe" if use_qr_grid and "qr_reihe" in df.columns else x_col
+    map_y = "qr_spalte" if use_qr_grid and "qr_spalte" in df.columns else y_col
+    grid = make_grid(df, x_col=map_x, y_col=map_y, metric=meta_metric, agg=agg, unit_mode=unit_mode, mm_per_px=mm_per_px)
+    metric_label = display_name(meta_metric, unit_mode)
+
+    finite_values = pd.to_numeric(df.get(meta_metric), errors="coerce")
+    finite_values = finite_values[np.isfinite(finite_values)]
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Rows with value", f"{int(finite_values.notna().sum()):,}")
+    k2.metric("Mean", f"{float(finite_values.mean()):.3g}" if len(finite_values) else "n/a")
+    k3.metric("Median", f"{float(finite_values.median()):.3g}" if len(finite_values) else "n/a")
+    k4.metric("Occupied cells", f"{len(grid):,}")
+
+    t_heat, t_3d, t_table, t_trends = st.tabs(["2D metadata map", "3D metadata bars", "Metadata grid table", "Metadata trends"])
+    with t_heat:
+        st.plotly_chart(
+            make_heatmap_figure(grid, x_col=map_x, y_col=map_y, metric=meta_metric, metric_label=metric_label),
+            use_container_width=True,
+        )
+    with t_3d:
+        st.plotly_chart(
+            make_3d_bar_figure(
+                grid,
+                x_col=map_x,
+                y_col=map_y,
+                metric=meta_metric,
+                metric_label=metric_label,
+                z_scale=z_scale,
+                z_height_fraction=z_height_fraction,
+            ),
+            use_container_width=True,
+        )
+    with t_table:
+        pivot = pivot_grid(grid)
+        st.dataframe(pivot, use_container_width=True)
+        st.download_button(
+            "Download metadata grid as CSV",
+            pivot.to_csv().encode("utf-8"),
+            file_name=f"metadata_grid_{meta_metric}_by_{map_x}_{map_y}.csv",
+            mime="text/csv",
+        )
+    with t_trends:
+        render_metadata_trend_pair(df, meta_metric=meta_metric, x_col=map_x, y_col=map_y, unit_mode=unit_mode, mm_per_px=mm_per_px)
+
+
+def render_metadata_trend_pair(df: pd.DataFrame, meta_metric: str, x_col: str, y_col: str, unit_mode: str, mm_per_px: float) -> None:
+    axes = [c for c in [x_col, y_col] if c in df.columns]
+    if not axes:
+        st.info("No grid axes are available for metadata trends.")
+        return
+    metric_label = display_name(meta_metric, unit_mode)
+    fig = go.Figure()
+    trend_tables: list[pd.DataFrame] = []
+    for axis in axes:
+        work = df[[axis, meta_metric]].copy()
+        work["axis_value"] = pd.to_numeric(work[axis], errors="coerce")
+        work["metric_value"] = convert_metric_series(meta_metric, work[meta_metric], unit_mode=unit_mode, mm_per_px=mm_per_px)
+        work = work.dropna(subset=["axis_value", "metric_value"])
+        if work.empty:
+            continue
+        trend = work.groupby("axis_value", dropna=True)["metric_value"].mean().reset_index(name="value").sort_values("axis_value")
+        trend["axis"] = display_name(axis)
+        trend_tables.append(trend)
+        fig.add_trace(go.Scatter(
+            x=trend["axis_value"],
+            y=trend["value"],
+            mode="lines+markers",
+            name=f"Mean by {display_name(axis)}",
+        ))
+    if not trend_tables:
+        st.warning("No finite metadata trend values are available.")
+        return
+    fig.update_layout(
+        title=f"{metric_label} trends across grid axes",
+        xaxis_title="Grid coordinate",
+        yaxis_title=metric_label,
+        height=480,
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    trend_all = pd.concat(trend_tables, ignore_index=True)
+    stats = trend_regression_table(trend_all.rename(columns={"axis": "trend_axis"}), group_col="trend_axis")
+    st.markdown("#### Metadata trend diagnostics")
+    st.dataframe(stats, use_container_width=True)
+    st.download_button(
+        "Download metadata trend values as CSV",
+        trend_all.to_csv(index=False).encode("utf-8"),
+        file_name=f"metadata_trends_{meta_metric}.csv",
+        mime="text/csv",
+    )
+
+
+def render_trend_analysis(df: pd.DataFrame, metric_cols: list[str], default_metric: str, unit_mode: str, mm_per_px: float) -> None:
+    st.subheader("Trend analysis")
+    st.caption("Aggregate any selected larva metric or parcel metadata variable along a row/column/sample axis and fit simple linear trends. This can be used for larva counts, larvae/kg, plant weight, plant number, and other numeric parcel metadata.")
+    if df.empty:
+        st.warning("No rows remain after filters.")
+        return
+
+    axis_candidates = [c for c in ["qr_reihe", "qr_spalte", "qr_plot", "qr_sample_id", "parcel_reihe", "parcel_spalte", "parcel_plot", "parcel_r4s"] if c in df.columns]
+    axis_candidates += [c for c in df.columns if (c.startswith("qr_") or c.startswith("parcel_")) and c not in axis_candidates and pd.api.types.is_numeric_dtype(df[c])]
     if not axis_candidates or not metric_cols:
         st.info("No suitable numeric QR axis or metric is available for trend analysis.")
         return
@@ -1032,7 +1258,7 @@ def render_trend_analysis(df: pd.DataFrame, metric_cols: list[str], default_metr
         trend_axis = st.selectbox("Trend axis", axis_candidates, index=index_or_zero(axis_candidates, "qr_reihe"), format_func=display_name, key="trend_axis")
     with c2:
         trend_metric = st.selectbox("Trend metric", metric_cols, index=index_or_zero(metric_cols, default_metric), format_func=lambda c: display_name(c, unit_mode), key="trend_metric")
-    group_options = ["<none>"] + [c for c in ["qr_condition", "qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id"] if c in df.columns and c != trend_axis]
+    group_options = ["<none>"] + [c for c in ["qr_condition", "qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id", "parcel_spalte", "parcel_reihe", "parcel_plot", "n_plants"] if c in df.columns and c != trend_axis]
     with c3:
         group_col = st.selectbox("Separate lines by", group_options, index=0, format_func=lambda c: "None" if c == "<none>" else display_name(c), key="trend_group")
     with c4:
@@ -1124,7 +1350,7 @@ def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: 
         st.info("No numeric metrics are available for clustering.")
         return
 
-    default_features = [c for c in ["count", "mean_skeleton_length_px", "mean_area_px", "mean_aspect_ratio", "n_rejected_masks", "valid_region_fraction"] if c in metric_cols]
+    default_features = [c for c in ["count", "count_per_kg_plant_weight", "plant_weight_kg", "n_plants", "plant_weight_per_plant_g", "mean_skeleton_length_px", "mean_area_px", "mean_aspect_ratio", "n_rejected_masks", "valid_region_fraction"] if c in metric_cols]
     if not default_features:
         default_features = metric_cols[: min(4, len(metric_cols))]
 
