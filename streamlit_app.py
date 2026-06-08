@@ -49,6 +49,20 @@ DISPLAY_NAMES = {
     "n_raw_masks": "Raw masks",
     "n_rejected_masks": "Rejected masks",
     "valid_region_fraction": "Valid region fraction",
+    "count_absolute": "Absolute larva count",
+    "count_from_worm_rows_absolute": "Absolute larva rows in table",
+    "count_per_kg_plant_weight": "Larvae per kg plant weight",
+    "count_from_worm_rows_per_kg_plant_weight": "Larva rows per kg plant weight",
+    "count_per_plant": "Larvae per plant",
+    "plant_weight_g": "Plant weight (g)",
+    "plant_weight_kg": "Plant weight (kg)",
+    "n_plants": "Number of plants",
+    "plant_weight_per_plant_g": "Plant weight per plant (g)",
+    "parcel_weight_match": "Plant-weight metadata matched",
+    "parcel_r4s": "Parcel R4S/sample ID",
+    "parcel_plot": "Parcel plot",
+    "parcel_spalte": "Parcel column",
+    "parcel_reihe": "Parcel row",
 }
 
 METRIC_COLOR_SCALES = {
@@ -79,7 +93,7 @@ def main() -> None:
     st.title("Larvae QR Grid Explorer")
     st.caption(
         "Flat GitHub/Streamlit version. Loads image_summary.parquet or image_summary.csv from the repository root, "
-        "repairs QR row/column fields from the decoded QR text, and averages duplicate grid positions by default."
+        "repairs QR row/column fields from the decoded QR text, supports grid maps, trend analysis, clustering, and QC/missing-field diagnostics."
     )
 
     try:
@@ -89,6 +103,10 @@ def main() -> None:
         st.stop()
 
     summary_df = repair_qr_metadata(summary_df)
+    parcel_df, parcel_source_label = load_parcel_metadata()
+    summary_df = attach_parcel_metadata(summary_df, parcel_df)
+    images_df, images_source_label = load_optional_table("images")
+    worms_df, worms_source_label = load_optional_table("worms")
 
     if summary_df.empty:
         st.warning("The image summary table is empty.")
@@ -97,9 +115,19 @@ def main() -> None:
     with st.sidebar:
         st.header("Data")
         st.caption(f"Loaded: `{source_label}`")
+        if parcel_source_label:
+            matched = int(summary_df.get("parcel_weight_match", pd.Series(False, index=summary_df.index)).fillna(False).sum())
+            st.caption(f"Parcel metadata: `{parcel_source_label}`; matched weights for {matched:,}/{len(summary_df):,} image rows")
+        else:
+            st.caption("Parcel metadata: not found (`parcel_metadata.csv` missing)")
         if (APP_DIR / "manifest.json").exists():
             with st.expander("Manifest", expanded=False):
                 st.json(load_manifest())
+        with st.expander("Loaded tables", expanded=False):
+            st.write(f"image_summary: `{source_label}`")
+            st.write(f"images: `{images_source_label or 'not found'}`")
+            st.write(f"worms: `{worms_source_label or 'not found'}`")
+            st.write(f"parcel_metadata: `{parcel_source_label or 'not found'}`")
 
         st.header("Filters")
         filtered = apply_filters(summary_df)
@@ -137,7 +165,24 @@ def main() -> None:
             help="Conversion factor for one working pixel. Default is 0.14 mm/px.",
         )
 
-        metric_cols = metric_columns(filtered, exclude={x_col, y_col})
+        st.header("Plant-weight normalization")
+        weight_available = "plant_weight_kg" in filtered.columns and pd.to_numeric(filtered.get("plant_weight_kg"), errors="coerce").gt(0).any()
+        normalize_counts_by_weight = st.checkbox(
+            "Normalize larva counts by plant weight",
+            value=False,
+            disabled=not weight_available,
+            help="When enabled, larva count metrics are transformed to larvae per kg plant weight for maps, trends and clustering. Absolute counts are retained in separate columns.",
+        )
+        if normalize_counts_by_weight:
+            n_weight = int(pd.to_numeric(filtered.get("plant_weight_kg"), errors="coerce").gt(0).sum())
+            st.caption(f"Using plant_weight_kg for {n_weight:,}/{len(filtered):,} currently filtered image rows. Count metric is shown as larvae/kg.")
+        elif not weight_available:
+            st.caption("No matched positive plant weights are available for the current filters.")
+
+        set_count_display_names(normalize_counts_by_weight)
+        analysis_df = apply_count_weight_normalization(filtered, enabled=normalize_counts_by_weight)
+
+        metric_cols = metric_columns(analysis_df, exclude={x_col, y_col})
         if not metric_cols:
             st.error("No numeric metric columns are available in image_summary.")
             st.stop()
@@ -176,15 +221,18 @@ def main() -> None:
         )
         show_value_table = st.checkbox("Show pivot table", value=True)
 
-    grid_assigned_mask = coordinates_available(filtered, x_col, y_col)
-    grid = make_grid(filtered, x_col=x_col, y_col=y_col, metric=metric, agg=agg, unit_mode=unit_mode, mm_per_px=mm_per_px)
+    filtered_for_analysis = analysis_df
+    grid_assigned_mask = coordinates_available(filtered_for_analysis, x_col, y_col)
+    grid = make_grid(filtered_for_analysis, x_col=x_col, y_col=y_col, metric=metric, agg=agg, unit_mode=unit_mode, mm_per_px=mm_per_px)
 
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("Total images", f"{len(filtered):,}")
+    kpi1.metric("Total images", f"{len(filtered_for_analysis):,}")
     kpi2.metric("Grid-assigned images", f"{int(grid_assigned_mask.sum()):,}")
     kpi3.metric("Occupied grid cells", f"{len(grid):,}")
-    if "count" in filtered.columns:
-        kpi4.metric("Total larvae", f"{int(pd.to_numeric(filtered['count'], errors='coerce').fillna(0).sum()):,}")
+    if "count_absolute" in filtered_for_analysis.columns:
+        kpi4.metric("Total larvae", f"{int(pd.to_numeric(filtered_for_analysis['count_absolute'], errors='coerce').fillna(0).sum()):,}")
+    elif "count" in filtered_for_analysis.columns:
+        kpi4.metric("Total larvae", f"{int(pd.to_numeric(filtered_for_analysis['count'], errors='coerce').fillna(0).sum()):,}")
     else:
         kpi4.metric("Total larvae", "n/a")
 
@@ -195,7 +243,9 @@ def main() -> None:
             "They remain in the total image and larva counts, but are omitted from the grid plots."
         )
 
-    tab_map, tab_3d, tab_table, tab_rows = st.tabs(["2D map", "3D bars", "Counter grid", "Rows"])
+    tab_map, tab_3d, tab_table, tab_rows, tab_trend, tab_cluster, tab_qc = st.tabs(
+        ["2D map", "3D bars", "Counter grid", "Rows", "Trend analysis", "Clustering", "QC / missing"]
+    )
 
     with tab_map:
         st.plotly_chart(
@@ -229,11 +279,11 @@ def main() -> None:
 
     with tab_rows:
         columns_to_show = unique_existing_columns(
-            [y_col, x_col, metric, "count", "qr_plot", "qr_condition", "qr_sample_id", "qr_extra_suffix", "qr_text", "original_filename", "output_basename"],
-            filtered.columns,
+            [y_col, x_col, metric, "count", "count_absolute", "count_per_kg_plant_weight", "plant_weight_kg", "plant_weight_g", "n_plants", "qr_plot", "qr_condition", "qr_sample_id", "qr_extra_suffix", "qr_text", "original_filename", "output_basename"],
+            filtered_for_analysis.columns,
         )
-        extra = [c for c in filtered.columns if c not in columns_to_show]
-        rows_df = filtered[columns_to_show + extra[:25]].copy()
+        extra = [c for c in filtered_for_analysis.columns if c not in columns_to_show]
+        rows_df = filtered_for_analysis[columns_to_show + extra[:25]].copy()
         rows_df = convert_dataframe_units(rows_df, unit_mode=unit_mode, mm_per_px=mm_per_px)
         rows_df = rename_for_display(rows_df, unit_mode=unit_mode)
         st.dataframe(rows_df, use_container_width=True, height=500)
@@ -243,6 +293,15 @@ def main() -> None:
             file_name="filtered_image_summary.csv",
             mime="text/csv",
         )
+
+    with tab_trend:
+        render_trend_analysis(filtered_for_analysis, metric_cols=metric_cols, default_metric=default_metric, unit_mode=unit_mode, mm_per_px=mm_per_px)
+
+    with tab_cluster:
+        render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=mm_per_px)
+
+    with tab_qc:
+        render_qc_analysis(summary_df, filtered, images_df, worms_df, parcel_df, x_col=x_col, y_col=y_col)
 
     if show_value_table:
         st.subheader("Current grid values")
@@ -271,6 +330,130 @@ def load_manifest() -> dict:
         return json.loads((APP_DIR / "manifest.json").read_text(encoding="utf-8"))
     except Exception as exc:
         return {"error": str(exc)}
+
+
+@st.cache_data(show_spinner=False)
+def load_optional_table(stem: str) -> tuple[pd.DataFrame | None, str | None]:
+    """Load an optional flat-table artifact from the app root.
+
+    Preference is parquet, then CSV. The app remains usable when auxiliary
+    tables are absent, which is useful for lightweight Streamlit deployments.
+    """
+    parquet_path = APP_DIR / f"{stem}.parquet"
+    csv_path = APP_DIR / f"{stem}.csv"
+    if parquet_path.exists():
+        try:
+            return pd.read_parquet(parquet_path), parquet_path.name
+        except Exception:
+            if not csv_path.exists():
+                return None, None
+    if csv_path.exists():
+        try:
+            return pd.read_csv(csv_path), csv_path.name
+        except Exception:
+            return None, None
+    return None, None
+
+
+@st.cache_data(show_spinner=False)
+def load_parcel_metadata() -> tuple[pd.DataFrame | None, str | None]:
+    """Load parcel-level plant-weight metadata from the app root."""
+    parquet_path = APP_DIR / "parcel_metadata.parquet"
+    csv_path = APP_DIR / "parcel_metadata.csv"
+    if parquet_path.exists():
+        try:
+            return pd.read_parquet(parquet_path), parquet_path.name
+        except Exception:
+            if not csv_path.exists():
+                return None, None
+    if csv_path.exists():
+        try:
+            return pd.read_csv(csv_path), csv_path.name
+        except Exception:
+            return None, None
+    return None, None
+
+
+def attach_parcel_metadata(summary_df: pd.DataFrame, parcel_df: pd.DataFrame | None) -> pd.DataFrame:
+    """Attach plant weight / parcel metadata to image summary rows.
+
+    Matching uses QR-derived plot, column, row and R4S/sample_id fields:
+    qr_plot -> parcel_plot, qr_spalte -> parcel_spalte, qr_reihe -> parcel_reihe,
+    qr_sample_id -> parcel_r4s.
+    """
+    out = summary_df.copy()
+    if parcel_df is None or parcel_df.empty:
+        out["parcel_weight_match"] = False
+        return add_weight_normalized_columns(out)
+
+    parcels = parcel_df.copy()
+    for col in ["parcel_plot", "parcel_spalte", "parcel_reihe", "parcel_r4s", "plant_weight_g", "plant_weight_kg", "n_plants", "plant_weight_per_plant_g"]:
+        if col in parcels.columns:
+            parcels[col] = pd.to_numeric(parcels[col], errors="coerce")
+    join_left = ["qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id"]
+    join_right = ["parcel_plot", "parcel_spalte", "parcel_reihe", "parcel_r4s"]
+    for col in join_left:
+        if col not in out.columns:
+            out[col] = np.nan
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    for col in join_right:
+        if col not in parcels.columns:
+            parcels[col] = np.nan
+    keep_cols = [c for c in [
+        "barcode", "parcel_plot", "parcel_spalte", "parcel_reihe", "parcel_r4s",
+        "plant_weight_g", "plant_weight_kg", "n_plants", "plant_weight_per_plant_g",
+        "observations", "plot_trap_disassemble", "larvae_in_tray_manual", "tray_observation",
+    ] if c in parcels.columns]
+    parcels = parcels[keep_cols].drop_duplicates(subset=join_right)
+    out = out.merge(parcels, left_on=join_left, right_on=join_right, how="left", suffixes=("", "_parcel"))
+    out["parcel_weight_match"] = pd.to_numeric(out.get("plant_weight_kg"), errors="coerce").gt(0)
+    return add_weight_normalized_columns(out)
+
+
+def add_weight_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "plant_weight_g" in out.columns and "plant_weight_kg" not in out.columns:
+        out["plant_weight_kg"] = pd.to_numeric(out["plant_weight_g"], errors="coerce") / 1000.0
+    if "plant_weight_kg" not in out.columns:
+        out["plant_weight_kg"] = np.nan
+    weight_kg = pd.to_numeric(out["plant_weight_kg"], errors="coerce")
+    valid_weight = weight_kg.gt(0)
+    for count_col in ["count", "count_from_worm_rows"]:
+        if count_col in out.columns:
+            counts = pd.to_numeric(out[count_col], errors="coerce")
+            out[f"{count_col}_absolute"] = counts
+            out[f"{count_col}_per_kg_plant_weight"] = np.where(valid_weight, counts / weight_kg, np.nan)
+    if "count" in out.columns and "n_plants" in out.columns:
+        n_plants = pd.to_numeric(out["n_plants"], errors="coerce")
+        out["count_per_plant"] = np.where(n_plants.gt(0), pd.to_numeric(out["count"], errors="coerce") / n_plants, np.nan)
+    return out
+
+
+def apply_count_weight_normalization(df: pd.DataFrame, enabled: bool) -> pd.DataFrame:
+    """Globally transform count columns to per-kg plant-weight values when requested."""
+    out = df.copy()
+    if not enabled:
+        return out
+    if "plant_weight_kg" not in out.columns:
+        return out
+    weight_kg = pd.to_numeric(out["plant_weight_kg"], errors="coerce")
+    valid_weight = weight_kg.gt(0)
+    for col in ["count", "count_from_worm_rows"]:
+        if col in out.columns:
+            counts = pd.to_numeric(out[col], errors="coerce")
+            if f"{col}_absolute" not in out.columns:
+                out[f"{col}_absolute"] = counts
+            out[col] = np.where(valid_weight, counts / weight_kg, np.nan)
+    return out
+
+
+def set_count_display_names(normalize_counts_by_weight: bool) -> None:
+    if normalize_counts_by_weight:
+        DISPLAY_NAMES["count"] = "Larvae per kg plant weight"
+        DISPLAY_NAMES["count_from_worm_rows"] = "Larva rows per kg plant weight"
+    else:
+        DISPLAY_NAMES["count"] = "Larva count"
+        DISPLAY_NAMES["count_from_worm_rows"] = "Larva rows in table"
 
 
 def repair_qr_metadata(df: pd.DataFrame) -> pd.DataFrame:
@@ -387,6 +570,10 @@ def metric_columns(df: pd.DataFrame, exclude: set[str]) -> list[str]:
             cols.append(col)
     preferred = [
         "count",
+        "count_per_kg_plant_weight",
+        "count_per_plant",
+        "plant_weight_kg",
+        "n_plants",
         "mean_skeleton_length_px",
         "median_skeleton_length_px",
         "mean_axis_major_px",
@@ -825,6 +1012,466 @@ def empty_figure(message: str) -> go.Figure:
     fig = go.Figure()
     fig.update_layout(annotations=[dict(text=message, showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")], height=500)
     return fig
+
+
+def render_trend_analysis(df: pd.DataFrame, metric_cols: list[str], default_metric: str, unit_mode: str, mm_per_px: float) -> None:
+    st.subheader("Trend analysis")
+    st.caption("Aggregate the selected metric along a row/column/sample axis and fit simple linear trends. This is intended as a quick check for spatial gradients across the grid.")
+    if df.empty:
+        st.warning("No rows remain after filters.")
+        return
+
+    axis_candidates = [c for c in ["qr_reihe", "qr_spalte", "qr_plot", "qr_sample_id"] if c in df.columns]
+    axis_candidates += [c for c in df.columns if c.startswith("qr_") and c not in axis_candidates and pd.api.types.is_numeric_dtype(df[c])]
+    if not axis_candidates or not metric_cols:
+        st.info("No suitable numeric QR axis or metric is available for trend analysis.")
+        return
+
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    with c1:
+        trend_axis = st.selectbox("Trend axis", axis_candidates, index=index_or_zero(axis_candidates, "qr_reihe"), format_func=display_name, key="trend_axis")
+    with c2:
+        trend_metric = st.selectbox("Trend metric", metric_cols, index=index_or_zero(metric_cols, default_metric), format_func=lambda c: display_name(c, unit_mode), key="trend_metric")
+    group_options = ["<none>"] + [c for c in ["qr_condition", "qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id"] if c in df.columns and c != trend_axis]
+    with c3:
+        group_col = st.selectbox("Separate lines by", group_options, index=0, format_func=lambda c: "None" if c == "<none>" else display_name(c), key="trend_group")
+    with c4:
+        agg = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "count"], index=0, key="trend_agg")
+
+    work_cols = [trend_axis, trend_metric] + ([] if group_col == "<none>" else [group_col])
+    work = df[work_cols].copy()
+    work["axis_value"] = pd.to_numeric(work[trend_axis], errors="coerce")
+    work["metric_value"] = convert_metric_series(trend_metric, work[trend_metric], unit_mode=unit_mode, mm_per_px=mm_per_px)
+    work = work.dropna(subset=["axis_value", "metric_value"])
+    if work.empty:
+        st.warning("No finite values are available for this trend selection.")
+        return
+
+    group_keys = ["axis_value"] if group_col == "<none>" else [group_col, "axis_value"]
+    grouped = work.groupby(group_keys, dropna=False)["metric_value"]
+    if agg == "count":
+        trend = grouped.count().reset_index(name="value")
+    else:
+        trend = getattr(grouped, agg)().reset_index(name="value")
+    trend = trend.sort_values(group_keys)
+
+    fig = go.Figure()
+    if group_col == "<none>":
+        fig.add_trace(go.Scatter(x=trend["axis_value"], y=trend["value"], mode="lines+markers", name=display_name(trend_metric, unit_mode)))
+    else:
+        groups = trend[group_col].astype(str).drop_duplicates().tolist()
+        max_groups = 16
+        if len(groups) > max_groups:
+            st.info(f"Showing the first {max_groups} groups in the plot. The statistics table still includes all groups.")
+            groups = groups[:max_groups]
+        for group in groups:
+            part = trend[trend[group_col].astype(str) == group]
+            fig.add_trace(go.Scatter(x=part["axis_value"], y=part["value"], mode="lines+markers", name=str(group)))
+
+    fig.update_layout(
+        title=f"{display_name(trend_metric, unit_mode)} trend along {display_name(trend_axis)}",
+        xaxis_title=display_name(trend_axis),
+        yaxis_title=display_name(trend_metric, unit_mode),
+        height=520,
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    stats = trend_regression_table(trend, group_col=None if group_col == "<none>" else group_col)
+    st.markdown("#### Linear trend diagnostics")
+    st.dataframe(stats, use_container_width=True)
+    st.download_button(
+        "Download trend table as CSV",
+        trend.to_csv(index=False).encode("utf-8"),
+        file_name=f"trend_{trend_metric}_by_{trend_axis}.csv",
+        mime="text/csv",
+    )
+
+
+def trend_regression_table(trend: pd.DataFrame, group_col: str | None = None) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    groups: list[tuple[object, pd.DataFrame]]
+    if group_col is None:
+        groups = [("all", trend)]
+    else:
+        groups = [(name, part) for name, part in trend.groupby(group_col, dropna=False)]
+    for name, part in groups:
+        x = pd.to_numeric(part["axis_value"], errors="coerce").to_numpy(float)
+        y = pd.to_numeric(part["value"], errors="coerce").to_numpy(float)
+        finite = np.isfinite(x) & np.isfinite(y)
+        x = x[finite]; y = y[finite]
+        row = {"group": name, "n_points": int(len(x))}
+        if len(x) >= 2 and float(np.nanstd(x)) > 0:
+            slope, intercept = np.polyfit(x, y, 1)
+            y_hat = slope * x + intercept
+            ss_res = float(np.sum((y - y_hat) ** 2))
+            ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+            r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            row.update({"slope_per_axis_unit": float(slope), "intercept": float(intercept), "r2": float(r2), "mean_value": float(np.mean(y))})
+        else:
+            row.update({"slope_per_axis_unit": np.nan, "intercept": np.nan, "r2": np.nan, "mean_value": float(np.mean(y)) if len(y) else np.nan})
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("r2", ascending=False, na_position="last")
+
+
+def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: str, y_col: str, unit_mode: str, mm_per_px: float) -> None:
+    st.subheader("Clustering analysis")
+    st.caption("Cluster parcels/images by selected numeric metrics. This uses a lightweight k-means implementation in the app, with z-scored features and a PCA preview for interpretation.")
+    if df.empty:
+        st.warning("No rows remain after filters.")
+        return
+    if not metric_cols:
+        st.info("No numeric metrics are available for clustering.")
+        return
+
+    default_features = [c for c in ["count", "mean_skeleton_length_px", "mean_area_px", "mean_aspect_ratio", "n_rejected_masks", "valid_region_fraction"] if c in metric_cols]
+    if not default_features:
+        default_features = metric_cols[: min(4, len(metric_cols))]
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        features = st.multiselect("Features", metric_cols, default=default_features, format_func=lambda c: display_name(c, unit_mode), key="cluster_features")
+    with c2:
+        k = st.slider("Number of clusters", min_value=2, max_value=8, value=3, step=1, key="cluster_k")
+    with c3:
+        cluster_level = st.selectbox("Cluster level", ["grid cells", "images"], index=0, help="Grid-cell mode averages duplicate row/column positions first.", key="cluster_level")
+
+    if not features:
+        st.info("Select at least one feature.")
+        return
+
+    work = df.copy()
+    for feature in features:
+        work[feature] = convert_metric_series(feature, work[feature], unit_mode=unit_mode, mm_per_px=mm_per_px)
+
+    if cluster_level == "grid cells":
+        if x_col not in work.columns or y_col not in work.columns:
+            st.warning("Selected grid axes are not available.")
+            return
+        work = work.dropna(subset=[x_col, y_col])
+        if work.empty:
+            st.warning("No grid-assigned rows are available for clustering.")
+            return
+        agg = work.groupby([y_col, x_col], dropna=True)[features].mean().reset_index()
+        label_cols = [y_col, x_col]
+    else:
+        id_cols = unique_existing_columns(["original_filename", "output_basename", "qr_plot", "qr_spalte", "qr_reihe", "qr_condition", "qr_sample_id"], work.columns)
+        agg = work[id_cols + features].copy()
+        label_cols = id_cols
+
+    feature_matrix = agg[features].apply(pd.to_numeric, errors="coerce")
+    usable_mask = feature_matrix.notna().any(axis=1)
+    agg = agg.loc[usable_mask].reset_index(drop=True)
+    feature_matrix = feature_matrix.loc[usable_mask].reset_index(drop=True)
+    if len(agg) < 2:
+        st.warning("Not enough rows with numeric feature values for clustering.")
+        return
+
+    X = feature_matrix.to_numpy(dtype=float)
+    X = fill_nan_with_column_median(X)
+    Z, means, scales = zscore_matrix(X)
+    k_eff = int(min(k, len(Z)))
+    labels, centers, inertia = kmeans_numpy(Z, k=k_eff, random_state=7, n_init=20)
+    agg["cluster"] = labels + 1
+
+    st.metric("Clustered rows", f"{len(agg):,}")
+    st.metric("Within-cluster inertia", f"{inertia:.3g}")
+
+    if cluster_level == "grid cells":
+        st.plotly_chart(make_cluster_map(agg, x_col=x_col, y_col=y_col), use_container_width=True)
+
+    pca = pca_scores(Z, n_components=2)
+    if pca is not None:
+        fig = go.Figure()
+        for cluster_id in sorted(agg["cluster"].unique()):
+            mask = agg["cluster"] == cluster_id
+            fig.add_trace(go.Scatter(
+                x=pca[mask.to_numpy(), 0],
+                y=pca[mask.to_numpy(), 1],
+                mode="markers",
+                name=f"Cluster {cluster_id}",
+                text=cluster_hover_text(agg.loc[mask], label_cols),
+                hovertemplate="%{text}<br>PC1=%{x:.3g}<br>PC2=%{y:.3g}<extra></extra>",
+            ))
+        fig.update_layout(title="PCA view of clustered feature space", xaxis_title="PC1", yaxis_title="PC2", height=500)
+        st.plotly_chart(fig, use_container_width=True)
+
+    profile = agg.groupby("cluster")[features].agg(["count", "mean", "median", "std"])
+    st.markdown("#### Cluster profiles")
+    st.dataframe(profile, use_container_width=True)
+
+    st.markdown("#### Cluster assignments")
+    display = rename_for_display(agg.copy(), unit_mode=unit_mode)
+    st.dataframe(display, use_container_width=True, height=420)
+    st.download_button(
+        "Download cluster assignments as CSV",
+        agg.to_csv(index=False).encode("utf-8"),
+        file_name="cluster_assignments.csv",
+        mime="text/csv",
+    )
+
+
+def fill_nan_with_column_median(X: np.ndarray) -> np.ndarray:
+    out = np.asarray(X, dtype=float).copy()
+    for j in range(out.shape[1]):
+        col = out[:, j]
+        finite = np.isfinite(col)
+        fill = float(np.median(col[finite])) if finite.any() else 0.0
+        col[~finite] = fill
+        out[:, j] = col
+    return out
+
+
+def zscore_matrix(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    means = np.nanmean(X, axis=0)
+    scales = np.nanstd(X, axis=0)
+    scales[~np.isfinite(scales) | (scales == 0)] = 1.0
+    return (X - means) / scales, means, scales
+
+
+def kmeans_numpy(Z: np.ndarray, k: int, random_state: int = 0, n_init: int = 10, max_iter: int = 200) -> tuple[np.ndarray, np.ndarray, float]:
+    rng = np.random.default_rng(random_state)
+    Z = np.asarray(Z, dtype=float)
+    n = Z.shape[0]
+    k = max(1, min(int(k), n))
+    best_labels = np.zeros(n, dtype=int)
+    best_centers = Z[:k].copy()
+    best_inertia = float("inf")
+    for _ in range(max(1, int(n_init))):
+        indices = rng.choice(n, size=k, replace=False)
+        centers = Z[indices].copy()
+        labels = np.zeros(n, dtype=int)
+        for _it in range(max_iter):
+            distances = ((Z[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+            new_labels = np.argmin(distances, axis=1)
+            if np.array_equal(new_labels, labels) and _it > 0:
+                break
+            labels = new_labels
+            for c in range(k):
+                members = Z[labels == c]
+                if len(members):
+                    centers[c] = members.mean(axis=0)
+                else:
+                    centers[c] = Z[rng.integers(0, n)]
+        inertia = float(((Z - centers[labels]) ** 2).sum())
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels.copy()
+            best_centers = centers.copy()
+    return best_labels, best_centers, best_inertia
+
+
+def pca_scores(Z: np.ndarray, n_components: int = 2) -> np.ndarray | None:
+    if Z.shape[0] < 2 or Z.shape[1] < 1:
+        return None
+    centered = Z - np.mean(Z, axis=0, keepdims=True)
+    try:
+        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return None
+    comps = min(n_components, U.shape[1])
+    scores = U[:, :comps] * S[:comps]
+    if comps == 1:
+        scores = np.column_stack([scores[:, 0], np.zeros(scores.shape[0])])
+    return scores
+
+
+def make_cluster_map(df: pd.DataFrame, x_col: str, y_col: str) -> go.Figure:
+    work = df.copy()
+    work["x_num"] = axis_to_numeric(work[x_col])
+    work["y_num"] = axis_to_numeric(work[y_col])
+    fig = go.Figure(go.Scatter(
+        x=work["x_num"],
+        y=work["y_num"],
+        mode="markers+text",
+        text=work["cluster"].astype(str),
+        textposition="middle center",
+        marker=dict(symbol="square", size=24, color=work["cluster"].astype(float), colorscale="Turbo", showscale=True, colorbar=dict(title="Cluster")),
+        customdata=np.column_stack([work[x_col].astype(str), work[y_col].astype(str), work["cluster"].astype(str)]),
+        hovertemplate=f"{display_name(x_col)}=%{{customdata[0]}}<br>{display_name(y_col)}=%{{customdata[1]}}<br>Cluster=%{{customdata[2]}}<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Cluster map",
+        xaxis_title=display_name(x_col),
+        yaxis_title=display_name(y_col),
+        yaxis=dict(autorange="reversed", scaleanchor="x", scaleratio=1),
+        height=620,
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+    return fig
+
+
+def cluster_hover_text(df: pd.DataFrame, label_cols: list[str]) -> list[str]:
+    texts = []
+    for _, row in df.iterrows():
+        parts = [f"{display_name(c)}={format_axis_label(row[c])}" for c in label_cols if c in row.index]
+        parts.append(f"Cluster={row.get('cluster', '')}")
+        texts.append("<br>".join(parts))
+    return texts
+
+
+def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_df: pd.DataFrame | None, worms_df: pd.DataFrame | None, parcel_df: pd.DataFrame | None, x_col: str, y_col: str) -> None:
+    st.subheader("QC / missing fields")
+    st.caption("Find unreadable QR codes, incomplete QR fields, duplicate parcels and missing grid cells for the current filter selection.")
+
+    qc_df = summary_df.copy()
+    required = [c for c in ["qr_plot", "qr_spalte", "qr_reihe", "qr_condition", "qr_sample_id"] if c in qc_df.columns]
+    qr_text_col = "qr_text" if "qr_text" in qc_df.columns else None
+    qr_text_ok = qc_df[qr_text_col].notna() & (qc_df[qr_text_col].astype(str).str.strip() != "") if qr_text_col else pd.Series(False, index=qc_df.index)
+    qr_detected_ok = qc_df.get("qr_detected", pd.Series(False, index=qc_df.index)).astype(str).str.lower().isin(["true", "1", "yes"])
+    required_ok = qc_df[required].notna().all(axis=1) if required else pd.Series(False, index=qc_df.index)
+    readable = qr_text_ok & qr_detected_ok & required_ok
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Images", f"{len(qc_df):,}")
+    k2.metric("Readable QR + fields", f"{int(readable.sum()):,}")
+    k3.metric("Unreadable/incomplete QR", f"{int((~readable).sum()):,}")
+    if "count" in qc_df.columns:
+        k4.metric("Total larvae", f"{int(pd.to_numeric(qc_df['count'], errors='coerce').fillna(0).sum()):,}")
+    else:
+        k4.metric("Total larvae", "n/a")
+
+    tab_qr, tab_fields, tab_missing, tab_dupes, tab_weights, tab_tables = st.tabs(["Unreadable QR", "Missing QR fields", "Missing parcels", "Duplicate parcels", "Plant weights", "Table inventory"])
+
+    with tab_qr:
+        bad = qc_df.loc[~readable].copy()
+        st.markdown("#### Images without a readable/complete QR code")
+        st.caption("A row is listed when QR text is missing, QR detection is false, or any required QR field is missing after relaxed parsing.")
+        show_cols = unique_existing_columns(["original_filename", "output_basename", "input_path", "qr_detected", "qr_text", "qr_method", "qr_plot", "qr_spalte", "qr_reihe", "qr_condition", "qr_sample_id", "overlay_png"], bad.columns)
+        st.dataframe(bad[show_cols] if show_cols else bad, use_container_width=True, height=420)
+        st.download_button("Download unreadable QR list", bad.to_csv(index=False).encode("utf-8"), file_name="unreadable_or_incomplete_qr_images.csv", mime="text/csv")
+
+    with tab_fields:
+        rows = []
+        for col in required + ["qr_text", "qr_detected", "qr_method"]:
+            if col in qc_df.columns:
+                missing = qc_df[col].isna() | (qc_df[col].astype(str).str.strip() == "")
+                rows.append({"field": col, "display_name": display_name(col), "missing_count": int(missing.sum()), "missing_fraction": float(missing.mean())})
+        field_df = pd.DataFrame(rows)
+        st.dataframe(field_df, use_container_width=True)
+        st.download_button("Download missing-field summary", field_df.to_csv(index=False).encode("utf-8"), file_name="missing_qr_field_summary.csv", mime="text/csv")
+
+    with tab_missing:
+        st.markdown("#### Missing parcels for current filters and selected grid axes")
+        missing = missing_grid_cells(filtered, x_col=x_col, y_col=y_col)
+        if missing.empty:
+            st.success("No missing integer grid cells were found inside the current selected axis ranges, or the axes are not numeric/integer-like.")
+        else:
+            st.write(f"Missing cells: **{len(missing):,}**")
+            st.dataframe(rename_for_display(missing, unit_mode="pixels"), use_container_width=True, height=420)
+            st.download_button("Download missing parcels", missing.to_csv(index=False).encode("utf-8"), file_name=f"missing_parcels_by_{x_col}_{y_col}.csv", mime="text/csv")
+
+    with tab_dupes:
+        st.markdown("#### Duplicate parcel assignments")
+        dupes = duplicate_grid_cells(filtered, x_col=x_col, y_col=y_col)
+        if dupes.empty:
+            st.success("No duplicate grid cells for the current selected axes.")
+        else:
+            st.dataframe(rename_for_display(dupes, unit_mode="pixels"), use_container_width=True, height=420)
+            st.download_button("Download duplicate parcels", dupes.to_csv(index=False).encode("utf-8"), file_name=f"duplicate_parcels_by_{x_col}_{y_col}.csv", mime="text/csv")
+
+    with tab_weights:
+        st.markdown("#### Plant-weight metadata matching")
+        if "plant_weight_kg" not in qc_df.columns:
+            st.info("No plant-weight columns are available. Add `parcel_metadata.csv` to the app root.")
+        else:
+            weight_kg = pd.to_numeric(qc_df["plant_weight_kg"], errors="coerce")
+            matched = weight_kg.gt(0)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Rows with plant weight", f"{int(matched.sum()):,}")
+            c2.metric("Rows without plant weight", f"{int((~matched).sum()):,}")
+            c3.metric("Mean plant weight", f"{float(weight_kg[matched].mean()):.3g} kg" if matched.any() else "n/a")
+            c4.metric("Median plant weight", f"{float(weight_kg[matched].median()):.3g} kg" if matched.any() else "n/a")
+            missing_weight = qc_df.loc[~matched].copy()
+            show_cols = unique_existing_columns(["original_filename", "output_basename", "qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id", "qr_text"], missing_weight.columns)
+            st.markdown("##### Analyzed images without matched plant weight")
+            st.dataframe(missing_weight[show_cols] if show_cols else missing_weight, use_container_width=True, height=280)
+            st.download_button("Download images without plant weight", missing_weight.to_csv(index=False).encode("utf-8"), file_name="images_without_plant_weight.csv", mime="text/csv")
+
+            if parcel_df is not None and not parcel_df.empty:
+                missing_expected = expected_parcels_without_image(summary_df, parcel_df)
+                st.markdown("##### Expected parcel rows without analyzed image")
+                if missing_expected.empty:
+                    st.success("Every parcel metadata row appears to have at least one matching analyzed image row.")
+                else:
+                    st.write(f"Missing expected parcel rows: **{len(missing_expected):,}**")
+                    st.dataframe(missing_expected, use_container_width=True, height=320)
+                    st.download_button("Download expected parcels without analyzed image", missing_expected.to_csv(index=False).encode("utf-8"), file_name="expected_parcels_without_analyzed_image.csv", mime="text/csv")
+
+    with tab_tables:
+        rows = [{"table": "image_summary", "available": True, "rows": len(summary_df), "columns": len(summary_df.columns)}]
+        rows.append({"table": "images", "available": images_df is not None, "rows": 0 if images_df is None else len(images_df), "columns": 0 if images_df is None else len(images_df.columns)})
+        rows.append({"table": "worms", "available": worms_df is not None, "rows": 0 if worms_df is None else len(worms_df), "columns": 0 if worms_df is None else len(worms_df.columns)})
+        rows.append({"table": "parcel_metadata", "available": parcel_df is not None, "rows": 0 if parcel_df is None else len(parcel_df), "columns": 0 if parcel_df is None else len(parcel_df.columns)})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        if images_df is not None:
+            with st.expander("Images table preview", expanded=False):
+                st.dataframe(images_df.head(200), use_container_width=True)
+        if worms_df is not None:
+            with st.expander("Worms table preview", expanded=False):
+                st.dataframe(worms_df.head(200), use_container_width=True)
+        if parcel_df is not None:
+            with st.expander("Parcel metadata preview", expanded=False):
+                st.dataframe(parcel_df.head(300), use_container_width=True)
+
+
+def expected_parcels_without_image(summary_df: pd.DataFrame, parcel_df: pd.DataFrame) -> pd.DataFrame:
+    if parcel_df is None or parcel_df.empty:
+        return pd.DataFrame()
+    left = parcel_df.copy()
+    right = summary_df.copy()
+    left_keys = ["parcel_plot", "parcel_spalte", "parcel_reihe", "parcel_r4s"]
+    right_keys = ["qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id"]
+    if not all(c in left.columns for c in left_keys) or not all(c in right.columns for c in right_keys):
+        return pd.DataFrame()
+    for c in left_keys:
+        left[c] = pd.to_numeric(left[c], errors="coerce")
+    for c in right_keys:
+        right[c] = pd.to_numeric(right[c], errors="coerce")
+    found = right[right_keys].dropna().drop_duplicates()
+    found = found.rename(columns=dict(zip(right_keys, left_keys)))
+    merged = left.merge(found.assign(_found=True), on=left_keys, how="left")
+    missing = merged[merged["_found"].isna()].drop(columns=["_found"])
+    show_cols = [c for c in ["barcode", "parcel_plot", "parcel_spalte", "parcel_reihe", "parcel_r4s", "plant_weight_g", "plant_weight_kg", "n_plants", "observations"] if c in missing.columns]
+    return missing[show_cols].sort_values([c for c in ["parcel_spalte", "parcel_reihe", "parcel_plot"] if c in show_cols])
+
+
+def missing_grid_cells(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
+    if x_col not in df.columns or y_col not in df.columns:
+        return pd.DataFrame()
+    xy = df[[x_col, y_col]].copy()
+    xy[x_col] = pd.to_numeric(xy[x_col], errors="coerce")
+    xy[y_col] = pd.to_numeric(xy[y_col], errors="coerce")
+    xy = xy.dropna()
+    if xy.empty:
+        return pd.DataFrame()
+    if not is_integer_like(xy[x_col]) or not is_integer_like(xy[y_col]):
+        return pd.DataFrame()
+    x_vals = xy[x_col].round().astype(int)
+    y_vals = xy[y_col].round().astype(int)
+    x_full = range(int(x_vals.min()), int(x_vals.max()) + 1)
+    y_full = range(int(y_vals.min()), int(y_vals.max()) + 1)
+    occupied = set(zip(x_vals, y_vals))
+    missing = [{x_col: x, y_col: y} for y in y_full for x in x_full if (x, y) not in occupied]
+    return pd.DataFrame(missing)
+
+
+def duplicate_grid_cells(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
+    if x_col not in df.columns or y_col not in df.columns:
+        return pd.DataFrame()
+    work = df.dropna(subset=[x_col, y_col]).copy()
+    if work.empty:
+        return pd.DataFrame()
+    group = work.groupby([y_col, x_col], dropna=False)
+    counts = group.size().reset_index(name="n_images")
+    dupes = counts[counts["n_images"] > 1].copy()
+    if dupes.empty:
+        return dupes
+    details = group.agg(
+        original_filenames=("original_filename", lambda s: "; ".join(map(str, s.dropna().head(10)))) if "original_filename" in work.columns else (work.columns[0], "count"),
+        output_basenames=("output_basename", lambda s: "; ".join(map(str, s.dropna().head(10)))) if "output_basename" in work.columns else (work.columns[0], "count"),
+    ).reset_index()
+    return dupes.merge(details, on=[y_col, x_col], how="left").sort_values("n_images", ascending=False)
 
 
 def index_or_zero(options: Iterable[object], value: object) -> int:
