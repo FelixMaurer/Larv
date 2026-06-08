@@ -1,6 +1,6 @@
 {
-  "segmentation_out": "/mnt/f/worm_segmentation_260603/output_ai_04_small_rescue-1",
-  "db_dir": "/mnt/f/worm_segmentation_260603/data/worm_database",
+  "segmentation_out": "/mnt/f/larvaepose_260607_001/larvaepose_segmentation_repo_v10_resume/repo_v10_work/output_ai_retrained_no_round2_thr030",
+  "db_dir": "/mnt/f/larvaepose_260607_001/larvaepose_segmentation_repo_v10_resume/repo_v10_work/data/worm_database",
   "tables": {
     "images_csv": "data/worm_database/images.csv",
     "images_parquet": "data/worm_database/images.parquet",
@@ -9,9 +9,9 @@
     "image_summary_csv": "data/worm_database/image_summary.csv",
     "image_summary_parquet": "data/worm_database/image_summary.parquet"
   },
-  "n_images": 436,
-  "n_worms": 22483,
-  "n_image_summary_rows": 436,
+  "n_images": 581,
+  "n_worms": 31678,
+  "n_image_summary_rows": 581,
   "coordinate_scale": "working_pixels",
   "scale_factor_values": [
     0.5
