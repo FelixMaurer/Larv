@@ -109,6 +109,18 @@ QR_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Fallback for QR strings where condition and sample ID are glued together,
+# e.g. "Plot49_Spalte1_Reihe49_R4S507_Ex".  The first regex above
+# correctly parses the canonical form "..._R4S_507_Ex"; this second route
+# rescues compact strings produced by some QR reads.
+QR_PREFIX_RE = re.compile(
+    r"Plot\s*(?P<plot>\d+)\s*[_\-\s]+"
+    r"Spalte\s*(?P<spalte>\d+)\s*[_\-\s]+"
+    r"Reihe\s*(?P<reihe>\d+)\s*[_\-\s]+"
+    r"(?P<tail>.+?)\s*$",
+    flags=re.IGNORECASE,
+)
+
 
 def main() -> None:
     st.title("Larvae QR Grid Explorer")
@@ -564,19 +576,68 @@ def parse_qr_row(row: pd.Series) -> dict | None:
 
 
 def parse_qr_text(text: str) -> dict | None:
+    """Parse QR strings robustly.
+
+    Accepted examples:
+    - Plot180_Spalte3_Reihe60_R4S_274_
+    - Plot49_Spalte1_Reihe49_R4S507_Ex
+    - Plot49-Spalte1-Reihe49-R4S-507-Ex
+    """
     cleaned = str(text).strip()
-    match = QR_RE.search(cleaned)
-    if not match:
+    if not cleaned or cleaned.lower() == "nan":
         return None
-    suffix = match.group("suffix")
-    if suffix is not None:
-        suffix = suffix.strip("_ -") or None
+
+    # Canonical parser first: condition and sample ID separated by _, -, or whitespace.
+    match = QR_RE.search(cleaned)
+    if match:
+        suffix = match.group("suffix")
+        if suffix is not None:
+            suffix = suffix.strip("_ -") or None
+        return {
+            "plot": int(match.group("plot")),
+            "spalte": int(match.group("spalte")),
+            "reihe": int(match.group("reihe")),
+            "condition": match.group("condition"),
+            "sample_id": int(match.group("sample_id")),
+            "suffix": suffix,
+        }
+
+    # Compact fallback: after Reihe, parse the tail manually.  This rescues e.g.
+    # R4S507_Ex by splitting the final numeric run off the first tail token.
+    prefix = QR_PREFIX_RE.search(cleaned)
+    if not prefix:
+        return None
+    tail = prefix.group("tail").strip("_ -")
+    if not tail:
+        return None
+    parts = [p for p in re.split(r"[_\-\s]+", tail) if p]
+    if not parts:
+        return None
+
+    condition = None
+    sample_id = None
+    suffix_parts: list[str] = []
+
+    if len(parts) >= 2 and re.fullmatch(r"\d+", parts[1]):
+        condition = parts[0]
+        sample_id = int(parts[1])
+        suffix_parts = parts[2:]
+    else:
+        compact = parts[0]
+        compact_match = re.fullmatch(r"(?P<condition>.+?)(?P<sample_id>\d+)", compact)
+        if not compact_match:
+            return None
+        condition = compact_match.group("condition").strip("_ -")
+        sample_id = int(compact_match.group("sample_id"))
+        suffix_parts = parts[1:]
+
+    suffix = "_".join(suffix_parts).strip("_ -") or None
     return {
-        "plot": int(match.group("plot")),
-        "spalte": int(match.group("spalte")),
-        "reihe": int(match.group("reihe")),
-        "condition": match.group("condition"),
-        "sample_id": int(match.group("sample_id")),
+        "plot": int(prefix.group("plot")),
+        "spalte": int(prefix.group("spalte")),
+        "reihe": int(prefix.group("reihe")),
+        "condition": condition,
+        "sample_id": sample_id,
         "suffix": suffix,
     }
 
@@ -1429,7 +1490,7 @@ def attach_gmm_size_classes(summary_df: pd.DataFrame, worms_df: pd.DataFrame | N
     if worms_df is None or worms_df.empty:
         return out_summary, worms_df, info
 
-    worms = repair_qr_metadata(worms_df.copy()) if "qr_reihe" not in worms_df.columns or "qr_spalte" not in worms_df.columns else worms_df.copy()
+    worms = repair_qr_metadata(worms_df.copy())
     try:
         worms, info = compute_larva_gmm_classes(worms, mm_per_px=mm_per_px)
     except Exception as exc:
@@ -1513,7 +1574,7 @@ def compute_larva_gmm_classes(worms_df: pd.DataFrame, mm_per_px: float = DEFAULT
         labels = 1 - labels
         proba = proba[:, ::-1]
 
-    worms["gmm_size_class"] = np.nan
+    worms["gmm_size_class"] = pd.Series([None] * len(worms), index=worms.index, dtype="object")
     worms["gmm_size1_probability"] = np.nan
     worms["gmm_size2_probability"] = np.nan
     worms["gmm_pc1"] = np.nan
