@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 
@@ -54,6 +55,16 @@ DISPLAY_NAMES = {
     "count_per_kg_plant_weight": "Larvae per kg plant weight",
     "count_from_worm_rows_per_kg_plant_weight": "Larva rows per kg plant weight",
     "count_per_plant": "Larvae per plant",
+
+    "gmm_total_count": "GMM-classified larva count",
+    "gmm_size1_count": "GMM Size 1 count",
+    "gmm_size2_count": "GMM Size 2 count",
+    "gmm_size2_fraction": "GMM Size 2 fraction",
+    "gmm_mean_size2_probability": "Mean GMM Size 2 probability",
+    "gmm_n_analyzed_larvae": "GMM-analyzed larvae",
+    "gmm_size1_count_per_kg_plant_weight": "GMM Size 1 larvae/kg plant weight",
+    "gmm_size2_count_per_kg_plant_weight": "GMM Size 2 larvae/kg plant weight",
+    "gmm_total_count_per_kg_plant_weight": "GMM-classified larvae/kg plant weight",
     "plant_weight_g": "Plant weight (g)",
     "plant_weight_kg": "Plant weight (kg)",
     "n_plants": "Number of plants",
@@ -81,6 +92,11 @@ METRIC_COLOR_SCALES = {
     "plant": "Greens",
     "weight": "Greens",
     "n_plants": "Teal",
+    "gmm": "Inferno",
+    "size1": "Blues",
+    "size2": "YlOrRd",
+    "probability": "Inferno",
+    "fraction": "Inferno",
 }
 
 QR_RE = re.compile(
@@ -112,6 +128,8 @@ def main() -> None:
     summary_df = attach_parcel_metadata(summary_df, parcel_df)
     images_df, images_source_label = load_optional_table("images")
     worms_df, worms_source_label = load_optional_table("worms")
+    summary_df, worms_df, gmm_info = attach_gmm_size_classes(summary_df, worms_df, mm_per_px=DEFAULT_MM_PER_PX)
+    summary_df = add_weight_normalized_columns(summary_df)
 
     if summary_df.empty:
         st.warning("The image summary table is empty.")
@@ -133,6 +151,7 @@ def main() -> None:
             st.write(f"images: `{images_source_label or 'not found'}`")
             st.write(f"worms: `{worms_source_label or 'not found'}`")
             st.write(f"parcel_metadata: `{parcel_source_label or 'not found'}`")
+            st.write(f"GMM size classes: `{'available' if gmm_info.get('available') else 'not available'}`")
 
         st.header("Filters")
         filtered = apply_filters(summary_df)
@@ -314,10 +333,31 @@ def main() -> None:
         render_trend_analysis(filtered_for_analysis, metric_cols=metric_cols, default_metric=default_metric, unit_mode=unit_mode, mm_per_px=mm_per_px)
 
     with tab_cluster:
-        render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=mm_per_px)
+        render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=mm_per_px, worms_df=worms_df, gmm_info=gmm_info)
 
     with tab_qc:
         render_qc_analysis(summary_df, filtered, images_df, worms_df, parcel_df, x_col=x_col, y_col=y_col)
+
+    st.divider()
+    st.subheader("Download report")
+    st.caption("Create a compact GMM infographic from the currently filtered data, including absolute counts and plant-weight-normalized counts where available.")
+    try:
+        report_pdf = build_gmm_infographic_pdf(filtered_for_analysis, gmm_info, x_col=x_col, y_col=y_col)
+        st.download_button(
+            "Download current GMM infographic PDF",
+            report_pdf,
+            file_name="larvae_gmm_infographic_current_data.pdf",
+            mime="application/pdf",
+        )
+    except Exception as exc:
+        st.warning(f"PDF infographic generation is not available in this environment: {exc}")
+        html_report = build_gmm_infographic_html(filtered_for_analysis, gmm_info, x_col=x_col, y_col=y_col)
+        st.download_button(
+            "Download current GMM infographic HTML",
+            html_report.encode("utf-8"),
+            file_name="larvae_gmm_infographic_current_data.html",
+            mime="text/html",
+        )
 
     if show_value_table:
         st.subheader("Current grid values")
@@ -434,7 +474,7 @@ def add_weight_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["plant_weight_kg"] = np.nan
     weight_kg = pd.to_numeric(out["plant_weight_kg"], errors="coerce")
     valid_weight = weight_kg.gt(0)
-    for count_col in ["count", "count_from_worm_rows"]:
+    for count_col in ["count", "count_from_worm_rows", "gmm_total_count", "gmm_size1_count", "gmm_size2_count"]:
         if count_col in out.columns:
             counts = pd.to_numeric(out[count_col], errors="coerce")
             out[f"{count_col}_absolute"] = counts
@@ -454,7 +494,7 @@ def apply_count_weight_normalization(df: pd.DataFrame, enabled: bool) -> pd.Data
         return out
     weight_kg = pd.to_numeric(out["plant_weight_kg"], errors="coerce")
     valid_weight = weight_kg.gt(0)
-    for col in ["count", "count_from_worm_rows"]:
+    for col in ["count", "count_from_worm_rows", "gmm_total_count", "gmm_size1_count", "gmm_size2_count"]:
         if col in out.columns:
             counts = pd.to_numeric(out[col], errors="coerce")
             if f"{col}_absolute" not in out.columns:
@@ -467,9 +507,15 @@ def set_count_display_names(normalize_counts_by_weight: bool) -> None:
     if normalize_counts_by_weight:
         DISPLAY_NAMES["count"] = "Larvae per kg plant weight"
         DISPLAY_NAMES["count_from_worm_rows"] = "Larva rows per kg plant weight"
+        DISPLAY_NAMES["gmm_total_count"] = "GMM-classified larvae/kg plant weight"
+        DISPLAY_NAMES["gmm_size1_count"] = "GMM Size 1 larvae/kg plant weight"
+        DISPLAY_NAMES["gmm_size2_count"] = "GMM Size 2 larvae/kg plant weight"
     else:
         DISPLAY_NAMES["count"] = "Larva count"
         DISPLAY_NAMES["count_from_worm_rows"] = "Larva rows in table"
+        DISPLAY_NAMES["gmm_total_count"] = "GMM-classified larva count"
+        DISPLAY_NAMES["gmm_size1_count"] = "GMM Size 1 count"
+        DISPLAY_NAMES["gmm_size2_count"] = "GMM Size 2 count"
 
 
 def repair_qr_metadata(df: pd.DataFrame) -> pd.DataFrame:
@@ -588,6 +634,14 @@ def metric_columns(df: pd.DataFrame, exclude: set[str]) -> list[str]:
         "count",
         "count_per_kg_plant_weight",
         "count_per_plant",
+        "gmm_total_count",
+        "gmm_size1_count",
+        "gmm_size2_count",
+        "gmm_size1_count_per_kg_plant_weight",
+        "gmm_size2_count_per_kg_plant_weight",
+        "gmm_total_count_per_kg_plant_weight",
+        "gmm_size2_fraction",
+        "gmm_mean_size2_probability",
         "plant_weight_kg",
         "plant_weight_g",
         "n_plants",
@@ -1340,101 +1394,359 @@ def trend_regression_table(trend: pd.DataFrame, group_col: str | None = None) ->
     return pd.DataFrame(rows).sort_values("r2", ascending=False, na_position="last")
 
 
-def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: str, y_col: str, unit_mode: str, mm_per_px: float) -> None:
-    st.subheader("Clustering analysis")
-    st.caption("Cluster parcels/images by selected numeric metrics. This uses a lightweight k-means implementation in the app, with z-scored features and a PCA preview for interpretation.")
-    if df.empty:
-        st.warning("No rows remain after filters.")
+
+# -----------------------------------------------------------------------------
+# Multivariate GMM size classes
+# -----------------------------------------------------------------------------
+
+GMM_LARVA_FEATURES = [
+    "area_mm2",
+    "skeleton_length_mm",
+    "axis_major_mm",
+    "axis_minor_mm",
+    "perimeter_mm",
+    "equivalent_diameter_area_mm",
+    "aspect_ratio",
+    "eccentricity",
+    "solidity",
+    "mean_skeleton_width_px",
+    "mean_gray",
+    "local_dark_contrast_gray",
+    "candidate_classifier_score",
+]
+
+
+def attach_gmm_size_classes(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None, mm_per_px: float = DEFAULT_MM_PER_PX) -> tuple[pd.DataFrame, pd.DataFrame | None, dict]:
+    """Fit a two-class multivariate larval GMM and merge image-level size-class counts.
+
+    The model is deliberately implemented in NumPy rather than scikit-learn so the
+    Streamlit app remains lightweight. Features are standardized to mean zero and
+    population standard deviation one. Labels are aligned so Size 1 is the lower
+    mean-area class and Size 2 is the higher mean-area class.
+    """
+    info: dict[str, object] = {"available": False, "message": "worms table not available"}
+    out_summary = summary_df.copy()
+    if worms_df is None or worms_df.empty:
+        return out_summary, worms_df, info
+
+    worms = repair_qr_metadata(worms_df.copy()) if "qr_reihe" not in worms_df.columns or "qr_spalte" not in worms_df.columns else worms_df.copy()
+    try:
+        worms, info = compute_larva_gmm_classes(worms, mm_per_px=mm_per_px)
+    except Exception as exc:
+        info = {"available": False, "message": f"GMM analysis failed: {exc}"}
+        return out_summary, worms_df, info
+
+    if not info.get("available") or "output_basename" not in worms.columns:
+        return out_summary, worms, info
+
+    g = worms.dropna(subset=["output_basename"]).copy()
+    g["gmm_size1_indicator"] = (g["gmm_size_class"] == "GMM Size 1").astype(int)
+    g["gmm_size2_indicator"] = (g["gmm_size_class"] == "GMM Size 2").astype(int)
+    image_gmm = g.groupby("output_basename", dropna=False).agg(
+        gmm_n_analyzed_larvae=("gmm_size_class", "count"),
+        gmm_size1_count=("gmm_size1_indicator", "sum"),
+        gmm_size2_count=("gmm_size2_indicator", "sum"),
+        gmm_mean_size2_probability=("gmm_size2_probability", "mean"),
+    ).reset_index()
+    image_gmm["gmm_total_count"] = image_gmm["gmm_size1_count"] + image_gmm["gmm_size2_count"]
+    image_gmm["gmm_size2_fraction"] = image_gmm["gmm_size2_count"] / image_gmm["gmm_total_count"].replace(0, np.nan)
+
+    for col in ["gmm_n_analyzed_larvae", "gmm_size1_count", "gmm_size2_count", "gmm_total_count"]:
+        image_gmm[col] = pd.to_numeric(image_gmm[col], errors="coerce")
+
+    out_summary = out_summary.merge(image_gmm, on="output_basename", how="left") if "output_basename" in out_summary.columns else out_summary
+    for col in ["gmm_n_analyzed_larvae", "gmm_size1_count", "gmm_size2_count", "gmm_total_count"]:
+        if col in out_summary.columns:
+            out_summary[col] = pd.to_numeric(out_summary[col], errors="coerce").fillna(0)
+    return out_summary, worms, info
+
+
+@st.cache_data(show_spinner=False)
+def compute_larva_gmm_classes(worms_df: pd.DataFrame, mm_per_px: float = DEFAULT_MM_PER_PX) -> tuple[pd.DataFrame, dict]:
+    worms = worms_df.copy()
+    if worms.empty:
+        return worms, {"available": False, "message": "worms table empty"}
+
+    def numeric_col(name: str) -> pd.Series:
+        return pd.to_numeric(worms[name], errors="coerce") if name in worms.columns else pd.Series(np.nan, index=worms.index)
+
+    worms["area_mm2"] = numeric_col("area_px") * float(mm_per_px) ** 2
+    worms["skeleton_length_mm"] = numeric_col("skeleton_length_px") * float(mm_per_px)
+    worms["axis_major_mm"] = numeric_col("axis_major_px") * float(mm_per_px)
+    worms["axis_minor_mm"] = numeric_col("axis_minor_px") * float(mm_per_px)
+    worms["perimeter_mm"] = numeric_col("perimeter_px") * float(mm_per_px)
+    worms["equivalent_diameter_area_mm"] = numeric_col("equivalent_diameter_area_px") * float(mm_per_px)
+
+    features = [c for c in GMM_LARVA_FEATURES if c in worms.columns]
+    if len(features) < 4:
+        return worms, {"available": False, "message": "too few larval features for GMM", "features": features}
+
+    qr_ok = pd.Series(True, index=worms.index)
+    if "qr_reihe" in worms.columns and "qr_spalte" in worms.columns:
+        qr_ok = pd.to_numeric(worms["qr_reihe"], errors="coerce").notna() & pd.to_numeric(worms["qr_spalte"], errors="coerce").notna()
+    Xraw = worms.loc[qr_ok, features].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    valid = Xraw.notna().all(axis=1)
+    Xraw = Xraw.loc[valid]
+    idx = Xraw.index
+    if len(Xraw) < 20:
+        return worms, {"available": False, "message": "too few complete larvae for GMM", "features": features}
+
+    # Conservative feature-wise trimming. This stabilizes PCA/GMM against extreme masks while keeping almost all larvae.
+    keep = pd.Series(True, index=idx)
+    for c in features:
+        lo, hi = np.nanpercentile(Xraw[c].to_numpy(float), [0.5, 99.5])
+        keep &= Xraw[c].between(lo, hi)
+    Xraw = Xraw.loc[keep]
+    idx = Xraw.index
+    if len(Xraw) < 20:
+        return worms, {"available": False, "message": "too few larvae after outlier trimming", "features": features}
+
+    X, means, scales = zscore_matrix(Xraw.to_numpy(float))
+    scores, evr, loadings = pca_numpy(X, n_components=min(5, X.shape[1]))
+    labels, proba, model2 = diag_gmm_fit(X, k=2, random_state=7, n_init=4, max_iter=120)
+
+    # Align labels by mean projected area: 0 = lower-size class, 1 = higher-size class.
+    area = worms.loc[idx, "area_mm2"].to_numpy(float)
+    mean0 = float(np.nanmean(area[labels == 0]))
+    mean1 = float(np.nanmean(area[labels == 1]))
+    if mean0 > mean1:
+        labels = 1 - labels
+        proba = proba[:, ::-1]
+
+    worms["gmm_size_class"] = np.nan
+    worms["gmm_size1_probability"] = np.nan
+    worms["gmm_size2_probability"] = np.nan
+    worms["gmm_pc1"] = np.nan
+    worms["gmm_pc2"] = np.nan
+    worms["gmm_pc3"] = np.nan
+    worms.loc[idx, "gmm_size_class"] = np.where(labels == 0, "GMM Size 1", "GMM Size 2")
+    worms.loc[idx, "gmm_size1_probability"] = proba[:, 0]
+    worms.loc[idx, "gmm_size2_probability"] = proba[:, 1]
+    for i in range(min(3, scores.shape[1])):
+        worms.loc[idx, f"gmm_pc{i+1}"] = scores[:, i]
+
+    model_selection = []
+    # Model selection is performed on PC1-PC3 to avoid over-weighting correlated raw morphometrics.
+    Xsel = scores[:, : min(3, scores.shape[1])]
+    for k in range(1, 7):
+        if len(Xsel) <= k:
+            break
+        _lab, _prob, m = diag_gmm_fit(Xsel, k=k, random_state=11 + k, n_init=3, max_iter=100)
+        n, d = Xsel.shape
+        n_params = (k - 1) + k * d + k * d
+        bic = n_params * math.log(n) - 2 * m["loglik"]
+        aic = 2 * n_params - 2 * m["loglik"]
+        model_selection.append({"k": k, "bic": float(bic), "aic": float(aic), "loglik": float(m["loglik"])})
+    best_bic = min(model_selection, key=lambda r: r["bic"])["k"] if model_selection else None
+
+    feature_diffs = []
+    for j, c in enumerate(features):
+        z1 = X[labels == 0, j]
+        z2 = X[labels == 1, j]
+        feature_diffs.append({
+            "feature": c,
+            "mean_z_size1": float(np.nanmean(z1)),
+            "mean_z_size2": float(np.nanmean(z2)),
+            "delta_z_size2_minus_size1": float(np.nanmean(z2) - np.nanmean(z1)),
+        })
+    feature_diffs = sorted(feature_diffs, key=lambda r: abs(r["delta_z_size2_minus_size1"]), reverse=True)
+
+    max_post = np.nanmax(proba, axis=1)
+    info = {
+        "available": True,
+        "message": "GMM size classes computed",
+        "features": features,
+        "n_analyzed_larvae": int(len(idx)),
+        "n_input_larvae": int(len(worms)),
+        "size1_count": int((labels == 0).sum()),
+        "size2_count": int((labels == 1).sum()),
+        "mean_area_size1_mm2": float(np.nanmean(area[labels == 0])),
+        "mean_area_size2_mm2": float(np.nanmean(area[labels == 1])),
+        "pca_explained_variance_ratio": [float(x) for x in evr[:5]],
+        "pca_cumulative_first3": float(np.nansum(evr[:3])),
+        "model_selection": model_selection,
+        "best_bic_k_pc123": best_bic,
+        "ambiguous_04_06_fraction": float(np.mean((proba[:, 1] > 0.4) & (proba[:, 1] < 0.6))),
+        "intermediate_025_075_fraction": float(np.mean((proba[:, 1] > 0.25) & (proba[:, 1] < 0.75))),
+        "high_confidence_090_fraction": float(np.mean(max_post > 0.90)),
+        "feature_differences": feature_diffs,
+        "loadings": {features[i]: {f"PC{j+1}": float(loadings[i, j]) for j in range(loadings.shape[1])} for i in range(len(features))},
+    }
+    return worms, info
+
+
+def pca_numpy(Z: np.ndarray, n_components: int = 5) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    Z = np.asarray(Z, dtype=float)
+    centered = Z - np.nanmean(Z, axis=0, keepdims=True)
+    U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+    n = max(Z.shape[0] - 1, 1)
+    var = (S ** 2) / n
+    evr = var / np.nansum(var) if np.nansum(var) > 0 else np.zeros_like(var)
+    comps = min(n_components, Vt.shape[0])
+    scores = U[:, :comps] * S[:comps]
+    loadings = Vt[:comps, :].T
+    return scores, evr[:comps], loadings
+
+
+def diag_gmm_fit(X: np.ndarray, k: int = 2, random_state: int = 0, n_init: int = 3, max_iter: int = 100) -> tuple[np.ndarray, np.ndarray, dict]:
+    X = np.asarray(X, dtype=float)
+    n, d = X.shape
+    rng = np.random.default_rng(random_state)
+    best: tuple[float, np.ndarray, np.ndarray, np.ndarray] | None = None
+    x1 = X[:, 0]
+    quantiles = np.linspace(0.12, 0.88, k)
+    for init in range(max(1, n_init)):
+        if init == 0:
+            centers = np.column_stack([np.quantile(X[:, j], quantiles) for j in range(d)])
+        else:
+            centers = X[rng.choice(n, size=k, replace=False)].copy()
+        vars_ = np.tile(np.var(X, axis=0, ddof=0) + 1e-6, (k, 1))
+        weights = np.full(k, 1.0 / k)
+        last_ll = -np.inf
+        for _ in range(max_iter):
+            logp = diag_gmm_logpdf(X, centers, vars_) + np.log(np.maximum(weights, 1e-12))[None, :]
+            log_norm = logsumexp_np(logp, axis=1)
+            resp = np.exp(logp - log_norm[:, None])
+            ll = float(np.sum(log_norm))
+            nk = np.maximum(resp.sum(axis=0), 1e-9)
+            weights = nk / n
+            centers = (resp.T @ X) / nk[:, None]
+            for c in range(k):
+                diff = X - centers[c]
+                vars_[c] = (resp[:, c][:, None] * diff * diff).sum(axis=0) / nk[c] + 1e-6
+            if abs(ll - last_ll) < 1e-5 * max(1.0, abs(ll)):
+                break
+            last_ll = ll
+        if best is None or ll > best[0]:
+            best = (ll, weights.copy(), centers.copy(), vars_.copy())
+    assert best is not None
+    ll, weights, centers, vars_ = best
+    logp = diag_gmm_logpdf(X, centers, vars_) + np.log(np.maximum(weights, 1e-12))[None, :]
+    log_norm = logsumexp_np(logp, axis=1)
+    proba = np.exp(logp - log_norm[:, None])
+    labels = np.argmax(proba, axis=1)
+    return labels, proba, {"loglik": float(np.sum(log_norm)), "weights": weights, "means": centers, "vars": vars_}
+
+
+def diag_gmm_logpdf(X: np.ndarray, means: np.ndarray, vars_: np.ndarray) -> np.ndarray:
+    X = np.asarray(X, dtype=float)
+    k = means.shape[0]
+    out = np.empty((X.shape[0], k), dtype=float)
+    for c in range(k):
+        out[:, c] = -0.5 * (np.sum(np.log(2 * np.pi * vars_[c])) + np.sum((X - means[c]) ** 2 / vars_[c], axis=1))
+    return out
+
+
+def logsumexp_np(a: np.ndarray, axis: int = 1) -> np.ndarray:
+    m = np.max(a, axis=axis, keepdims=True)
+    return (m + np.log(np.sum(np.exp(a - m), axis=axis, keepdims=True))).squeeze(axis)
+
+
+def gmm_assignments_table(worms_df: pd.DataFrame | None) -> pd.DataFrame:
+    if worms_df is None or worms_df.empty or "gmm_size_class" not in worms_df.columns:
+        return pd.DataFrame()
+    cols = unique_existing_columns([
+        "original_filename", "output_basename", "worm_id", "qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id",
+        "area_mm2", "skeleton_length_mm", "equivalent_diameter_area_mm", "aspect_ratio", "solidity",
+        "gmm_size_class", "gmm_size1_probability", "gmm_size2_probability", "gmm_pc1", "gmm_pc2", "gmm_pc3",
+    ], worms_df.columns)
+    return worms_df.loc[worms_df.get("gmm_size_class", pd.Series(index=worms_df.index)).notna(), cols].copy()
+
+
+def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: str, y_col: str, unit_mode: str, mm_per_px: float, worms_df: pd.DataFrame | None = None, gmm_info: dict | None = None) -> None:
+    st.subheader("GMM larval size-class analysis")
+    st.caption("Multivariate two-class Gaussian mixture model fitted to individual larvae. Classes are aligned so GMM Size 1 is the lower-size class and GMM Size 2 is the higher-size class.")
+    gmm_info = gmm_info or {"available": False}
+    if not gmm_info.get("available"):
+        st.warning(gmm_info.get("message", "GMM size classes are not available."))
         return
-    if not metric_cols:
-        st.info("No numeric metrics are available for clustering.")
-        return
 
-    default_features = [c for c in ["count", "count_per_kg_plant_weight", "plant_weight_kg", "n_plants", "plant_weight_per_plant_g", "mean_skeleton_length_px", "mean_area_px", "mean_aspect_ratio", "n_rejected_masks", "valid_region_fraction"] if c in metric_cols]
-    if not default_features:
-        default_features = metric_cols[: min(4, len(metric_cols))]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("GMM-analyzed larvae", f"{int(gmm_info.get('n_analyzed_larvae', 0)):,}")
+    c2.metric("GMM Size 1", f"{int(gmm_info.get('size1_count', 0)):,}")
+    c3.metric("GMM Size 2", f"{int(gmm_info.get('size2_count', 0)):,}")
+    c4.metric("Ambiguous P(Size 2)=0.4–0.6", f"{100*float(gmm_info.get('ambiguous_04_06_fraction', np.nan)):.2f}%")
 
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        features = st.multiselect("Features", metric_cols, default=default_features, format_func=lambda c: display_name(c, unit_mode), key="cluster_features")
-    with c2:
-        k = st.slider("Number of clusters", min_value=2, max_value=8, value=3, step=1, key="cluster_k")
-    with c3:
-        cluster_level = st.selectbox("Cluster level", ["grid cells", "images"], index=0, help="Grid-cell mode averages duplicate row/column positions first.", key="cluster_level")
-
-    if not features:
-        st.info("Select at least one feature.")
-        return
-
-    work = df.copy()
-    for feature in features:
-        work[feature] = convert_metric_series(feature, work[feature], unit_mode=unit_mode, mm_per_px=mm_per_px)
-
-    if cluster_level == "grid cells":
-        if x_col not in work.columns or y_col not in work.columns:
-            st.warning("Selected grid axes are not available.")
-            return
-        work = work.dropna(subset=[x_col, y_col])
-        if work.empty:
-            st.warning("No grid-assigned rows are available for clustering.")
-            return
-        agg = work.groupby([y_col, x_col], dropna=True)[features].mean().reset_index()
-        label_cols = [y_col, x_col]
+    st.markdown("#### Field maps from GMM classes")
+    map_metrics = [c for c in ["gmm_total_count", "gmm_size1_count", "gmm_size2_count", "gmm_size2_fraction", "gmm_mean_size2_probability", "gmm_total_count_per_kg_plant_weight", "gmm_size1_count_per_kg_plant_weight", "gmm_size2_count_per_kg_plant_weight"] if c in df.columns]
+    if map_metrics:
+        map_metric = st.selectbox("GMM map metric", map_metrics, index=0, format_func=lambda c: display_name(c, unit_mode), key="gmm_map_metric")
+        agg = "mean" if "fraction" in map_metric or "probability" in map_metric or "per_kg" in map_metric else "sum"
+        grid = make_grid(df, x_col=x_col, y_col=y_col, metric=map_metric, agg=agg, unit_mode=unit_mode, mm_per_px=mm_per_px)
+        st.plotly_chart(make_heatmap_figure(grid, x_col=x_col, y_col=y_col, metric=map_metric, metric_label=display_name(map_metric, unit_mode)), use_container_width=True)
     else:
-        id_cols = unique_existing_columns(["original_filename", "output_basename", "qr_plot", "qr_spalte", "qr_reihe", "qr_condition", "qr_sample_id"], work.columns)
-        agg = work[id_cols + features].copy()
-        label_cols = id_cols
+        st.info("No GMM image-level metrics are available in the filtered image summary.")
 
-    feature_matrix = agg[features].apply(pd.to_numeric, errors="coerce")
-    usable_mask = feature_matrix.notna().any(axis=1)
-    agg = agg.loc[usable_mask].reset_index(drop=True)
-    feature_matrix = feature_matrix.loc[usable_mask].reset_index(drop=True)
-    if len(agg) < 2:
-        st.warning("Not enough rows with numeric feature values for clustering.")
-        return
+    assignments = gmm_assignments_table(worms_df)
+    if assignments.empty:
+        st.info("Larval-level GMM assignments are not available for PCA diagnostics.")
+    else:
+        st.markdown("#### PCA view of individual larvae")
+        max_points = st.slider("Maximum larvae shown in PCA plots", 1000, 20000, 8000, step=1000, key="gmm_pca_max_points")
+        plot_df = assignments.dropna(subset=["gmm_pc1", "gmm_pc2", "gmm_size_class"]).copy()
+        if len(plot_df) > max_points:
+            plot_df = plot_df.sample(max_points, random_state=7)
+        colors = np.where(plot_df["gmm_size_class"].astype(str).eq("GMM Size 2"), 1, 0)
+        hover_cols = unique_existing_columns(["output_basename", "worm_id", "area_mm2", "skeleton_length_mm", "gmm_size2_probability"], plot_df.columns)
+        hover = plot_df[hover_cols].astype(str).agg("<br>".join, axis=1) if hover_cols else None
+        evr = list(gmm_info.get("pca_explained_variance_ratio", []))
+        pc1 = 100*evr[0] if len(evr)>0 else np.nan
+        pc2 = 100*evr[1] if len(evr)>1 else np.nan
+        pc3 = 100*evr[2] if len(evr)>2 else np.nan
+        fig2 = go.Figure(go.Scatter(
+            x=plot_df["gmm_pc1"], y=plot_df["gmm_pc2"], mode="markers",
+            marker=dict(size=4, color=colors, colorscale=[[0, "#2563EB"], [1, "#F97316"]], opacity=0.45, colorbar=dict(title="GMM Size 2")),
+            text=hover,
+            hovertemplate="%{text}<br>PC1=%{x:.3g}<br>PC2=%{y:.3g}<extra></extra>" if hover is not None else "PC1=%{x:.3g}<br>PC2=%{y:.3g}<extra></extra>",
+        ))
+        fig2.update_layout(title="2D PCA of GMM-classified larvae", xaxis_title=f"PC1 ({pc1:.1f}%)", yaxis_title=f"PC2 ({pc2:.1f}%)", height=560)
+        st.plotly_chart(fig2, use_container_width=True)
 
-    X = feature_matrix.to_numpy(dtype=float)
-    X = fill_nan_with_column_median(X)
-    Z, means, scales = zscore_matrix(X)
-    k_eff = int(min(k, len(Z)))
-    labels, centers, inertia = kmeans_numpy(Z, k=k_eff, random_state=7, n_init=20)
-    agg["cluster"] = labels + 1
+        if "gmm_pc3" in plot_df.columns and plot_df["gmm_pc3"].notna().any():
+            with st.expander("3D PCA view", expanded=False):
+                fig3 = go.Figure(go.Scatter3d(
+                    x=plot_df["gmm_pc1"], y=plot_df["gmm_pc2"], z=plot_df["gmm_pc3"], mode="markers",
+                    marker=dict(size=2.5, color=colors, colorscale=[[0, "#2563EB"], [1, "#F97316"]], opacity=0.35),
+                    text=hover,
+                    hovertemplate="%{text}<br>PC1=%{x:.3g}<br>PC2=%{y:.3g}<br>PC3=%{z:.3g}<extra></extra>" if hover is not None else None,
+                ))
+                fig3.update_layout(title="3D PCA of GMM-classified larvae", scene=dict(xaxis_title=f"PC1 ({pc1:.1f}%)", yaxis_title=f"PC2 ({pc2:.1f}%)", zaxis_title=f"PC3 ({pc3:.1f}%)"), height=650)
+                st.plotly_chart(fig3, use_container_width=True)
 
-    st.metric("Clustered rows", f"{len(agg):,}")
-    st.metric("Within-cluster inertia", f"{inertia:.3g}")
+        st.markdown("#### Posterior probability and model-selection diagnostics")
+        p2 = pd.to_numeric(assignments.get("gmm_size2_probability"), errors="coerce").dropna()
+        figp = go.Figure(go.Histogram(x=p2, nbinsx=50, marker_color="#F97316"))
+        figp.update_layout(title="GMM Size 2 posterior probability", xaxis_title="P(GMM Size 2)", yaxis_title="Larvae", height=360)
+        st.plotly_chart(figp, use_container_width=True)
 
-    if cluster_level == "grid cells":
-        st.plotly_chart(make_cluster_map(agg, x_col=x_col, y_col=y_col), use_container_width=True)
+    ms = pd.DataFrame(gmm_info.get("model_selection", []))
+    if not ms.empty:
+        ms["delta_bic"] = ms["bic"] - ms["bic"].min()
+        fig_ms = go.Figure()
+        fig_ms.add_trace(go.Scatter(x=ms["k"], y=ms["delta_bic"], mode="lines+markers", name="ΔBIC"))
+        if "aic" in ms.columns:
+            ms["delta_aic"] = ms["aic"] - ms["aic"].min()
+            fig_ms.add_trace(go.Scatter(x=ms["k"], y=ms["delta_aic"], mode="lines+markers", name="ΔAIC"))
+        fig_ms.update_layout(title="GMM model selection in PC1–PC3 space", xaxis_title="Number of mixture components k", yaxis_title="Information criterion above best", height=360)
+        st.plotly_chart(fig_ms, use_container_width=True)
+        st.dataframe(ms, use_container_width=True)
 
-    pca = pca_scores(Z, n_components=2)
-    if pca is not None:
-        fig = go.Figure()
-        for cluster_id in sorted(agg["cluster"].unique()):
-            mask = agg["cluster"] == cluster_id
-            fig.add_trace(go.Scatter(
-                x=pca[mask.to_numpy(), 0],
-                y=pca[mask.to_numpy(), 1],
-                mode="markers",
-                name=f"Cluster {cluster_id}",
-                text=cluster_hover_text(agg.loc[mask], label_cols),
-                hovertemplate="%{text}<br>PC1=%{x:.3g}<br>PC2=%{y:.3g}<extra></extra>",
-            ))
-        fig.update_layout(title="PCA view of clustered feature space", xaxis_title="PC1", yaxis_title="PC2", height=500)
-        st.plotly_chart(fig, use_container_width=True)
+    fd = pd.DataFrame(gmm_info.get("feature_differences", []))
+    if not fd.empty:
+        st.markdown("#### Features separating GMM Size 1 and Size 2")
+        show = fd.reindex(fd["delta_z_size2_minus_size1"].abs().sort_values(ascending=True).index).tail(14)
+        figf = go.Figure(go.Bar(
+            x=show["delta_z_size2_minus_size1"], y=show["feature"], orientation="h",
+            marker_color=np.where(show["delta_z_size2_minus_size1"] >= 0, "#F97316", "#2563EB"),
+        ))
+        figf.update_layout(title="Mean standardized feature difference: GMM Size 2 − GMM Size 1", xaxis_title="Difference in z units", yaxis_title="Feature", height=520)
+        st.plotly_chart(figf, use_container_width=True)
+        st.dataframe(fd, use_container_width=True)
 
-    profile = agg.groupby("cluster")[features].agg(["count", "mean", "median", "std"])
-    st.markdown("#### Cluster profiles")
-    st.dataframe(profile, use_container_width=True)
-
-    st.markdown("#### Cluster assignments")
-    display = rename_for_display(agg.copy(), unit_mode=unit_mode)
-    st.dataframe(display, use_container_width=True, height=420)
-    st.download_button(
-        "Download cluster assignments as CSV",
-        agg.to_csv(index=False).encode("utf-8"),
-        file_name="cluster_assignments.csv",
-        mime="text/csv",
-    )
+    if not assignments.empty:
+        st.download_button("Download larval GMM assignments as CSV", assignments.to_csv(index=False).encode("utf-8"), file_name="larval_gmm_assignments.csv", mime="text/csv")
+    gmm_cols = [c for c in df.columns if c.startswith("gmm_") or c in [x_col, y_col, "output_basename", "original_filename", "plant_weight_kg", "plant_weight_g", "n_plants"]]
+    st.download_button("Download image-level GMM metrics as CSV", df[gmm_cols].to_csv(index=False).encode("utf-8"), file_name="image_level_gmm_metrics.csv", mime="text/csv")
 
 
 def fill_nan_with_column_median(X: np.ndarray) -> np.ndarray:
@@ -1534,6 +1846,118 @@ def cluster_hover_text(df: pd.DataFrame, label_cols: list[str]) -> list[str]:
         parts.append(f"Cluster={row.get('cluster', '')}")
         texts.append("<br>".join(parts))
     return texts
+
+
+
+# -----------------------------------------------------------------------------
+# Downloadable compact infographic report
+# -----------------------------------------------------------------------------
+
+def build_gmm_infographic_html(df: pd.DataFrame, gmm_info: dict, x_col: str, y_col: str) -> str:
+    n_images = len(df)
+    total_abs = pd.to_numeric(df.get("count_absolute", df.get("count", pd.Series(dtype=float))), errors="coerce").sum()
+    matched_weight = pd.to_numeric(df.get("plant_weight_kg", pd.Series(dtype=float)), errors="coerce").gt(0).sum()
+    return f"""<!doctype html><html><head><meta charset='utf-8'><title>Larval GMM infographic</title>
+<style>body{{font-family:Arial,sans-serif;margin:28px;color:#111827}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.card{{border:1px solid #d1d5db;padding:10px}}.big{{font-size:26px;font-weight:700}} table{{border-collapse:collapse}}td,th{{border:1px solid #d1d5db;padding:5px}}</style></head><body>
+<h1>CSFB larval GMM field analysis</h1><p>Generated from the currently filtered Streamlit data.</p>
+<div class='grid'><div class='card'>Images<div class='big'>{n_images:,}</div></div><div class='card'>Absolute larvae<div class='big'>{int(total_abs):,}</div></div><div class='card'>Rows with plant weight<div class='big'>{int(matched_weight):,}</div></div><div class='card'>GMM analyzed larvae<div class='big'>{int(gmm_info.get('n_analyzed_larvae',0)):,}</div></div></div>
+<h2>Main interpretation</h2><p>The app uses a multivariate two-class GMM on individual larvae. Counts are available both as absolute counts and, when plant weight is matched, as larvae per kg plant weight.</p>
+</body></html>"""
+
+
+def build_gmm_infographic_pdf(df: pd.DataFrame, gmm_info: dict, x_col: str, y_col: str) -> bytes:
+    """Build a compact A4-landscape PDF from the currently filtered app data."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+    import matplotlib.pyplot as plt
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=landscape(A4))
+    width, height = landscape(A4)
+    margin = 24
+
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(margin, height - 34, "CSFB larval GMM field analysis")
+    c.setFont("Helvetica", 9)
+    c.setFillColor(colors.HexColor("#4b5563"))
+    c.drawString(margin, height - 50, "QR-linked larvae | multivariate GMM size classes | absolute and plant-weight-normalized counts")
+    c.setFillColor(colors.black)
+
+    total_abs = pd.to_numeric(df.get("count_absolute", df.get("count", pd.Series(dtype=float))), errors="coerce").fillna(0).sum()
+    total_kg = pd.to_numeric(df.get("plant_weight_kg", pd.Series(dtype=float)), errors="coerce").where(lambda s: s.gt(0)).sum()
+    larvae_per_kg = total_abs / total_kg if total_kg and np.isfinite(total_kg) and total_kg > 0 else np.nan
+    cards = [
+        ("images", f"{len(df):,}"),
+        ("absolute larvae", f"{int(total_abs):,}"),
+        ("plant weight", f"{total_kg:.2f} kg" if np.isfinite(larvae_per_kg) else "n/a"),
+        ("larvae/kg", f"{larvae_per_kg:.1f}" if np.isfinite(larvae_per_kg) else "n/a"),
+        ("GMM analyzed larvae", f"{int(gmm_info.get('n_analyzed_larvae', 0)):,}"),
+        ("GMM Size 1", f"{int(gmm_info.get('size1_count', 0)):,}"),
+        ("GMM Size 2", f"{int(gmm_info.get('size2_count', 0)):,}"),
+        ("ambiguous", f"{100*float(gmm_info.get('ambiguous_04_06_fraction', np.nan)):.2f}%"),
+    ]
+    card_w = (width - 2 * margin - 7 * 6) / 8
+    y = height - 88
+    for i, (lab, val) in enumerate(cards):
+        x = margin + i * (card_w + 6)
+        c.setStrokeColor(colors.HexColor("#d1d5db")); c.setLineWidth(0.7)
+        c.rect(x, y, card_w, 42, stroke=1, fill=0)
+        c.setFont("Helvetica", 7); c.setFillColor(colors.HexColor("#4b5563")); c.drawString(x + 5, y + 28, lab)
+        c.setFont("Helvetica-Bold", 13); c.setFillColor(colors.HexColor("#111827")); c.drawString(x + 5, y + 10, val)
+
+    # Field maps
+    map_metrics = [m for m in ["gmm_total_count", "gmm_size1_count", "gmm_size2_count", "gmm_total_count_per_kg_plant_weight", "gmm_size1_count_per_kg_plant_weight", "gmm_size2_count_per_kg_plant_weight", "gmm_size2_fraction", "gmm_mean_size2_probability"] if m in df.columns]
+    preferred = [m for m in ["gmm_total_count", "gmm_size1_count", "gmm_size2_count", "gmm_total_count_per_kg_plant_weight", "gmm_size2_fraction", "gmm_mean_size2_probability"] if m in map_metrics]
+    img = make_matplotlib_maps_png(df, preferred[:6], x_col=x_col, y_col=y_col)
+    if img is not None:
+        c.drawImage(ImageReader(img), margin, 112, width - 2*margin, height - 220, preserveAspectRatio=True, mask='auto')
+
+    c.setFont("Helvetica-Bold", 10); c.setFillColor(colors.HexColor("#111827")); c.drawString(margin, 78, "Main result")
+    c.setFont("Helvetica", 8.5)
+    c.drawString(margin, 63, "Use GMM Size 1/2 counts as multivariate size-class counts; compare absolute counts with larvae/kg plant weight for biomass-normalized pressure.")
+    c.setFont("Helvetica-Bold", 10); c.drawString(width/2, 78, "Interpretation")
+    c.setFont("Helvetica", 8.5)
+    c.drawString(width/2, 63, "If Size 2 fraction or mean P(Size 2) is spatially flat while counts vary, the field effect is mainly abundance rather than composition.")
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def make_matplotlib_maps_png(df: pd.DataFrame, metrics: list[str], x_col: str, y_col: str) -> BytesIO | None:
+    if not metrics:
+        return None
+    import matplotlib.pyplot as plt
+    n = len(metrics)
+    fig_h = 1.55 * n
+    fig, axes = plt.subplots(n, 1, figsize=(10.6, fig_h), squeeze=False)
+    axes = axes[:, 0]
+    for ax, metric in zip(axes, metrics):
+        work = df[[x_col, y_col, metric]].copy()
+        work[x_col] = pd.to_numeric(work[x_col], errors="coerce")
+        work[y_col] = pd.to_numeric(work[y_col], errors="coerce")
+        work[metric] = pd.to_numeric(work[metric], errors="coerce")
+        work = work.dropna()
+        if work.empty:
+            ax.axis("off"); continue
+        agg = "mean" if "fraction" in metric or "probability" in metric or "per_kg" in metric else "sum"
+        pivot = work.pivot_table(index=y_col, columns=x_col, values=metric, aggfunc=agg)
+        pivot = complete_numeric_pivot(pivot)
+        arr = np.ma.masked_invalid(pivot.values)
+        im = ax.imshow(arr, origin="lower", aspect="equal", cmap="inferno")
+        ax.set_title(display_name(metric), loc="left", fontsize=9, fontweight="bold")
+        ax.set_ylabel(display_name(y_col), fontsize=8)
+        ax.tick_params(labelsize=7, length=2)
+        fig.colorbar(im, ax=ax, pad=0.01, shrink=0.8)
+    axes[-1].set_xlabel(display_name(x_col), fontsize=8)
+    fig.tight_layout(pad=0.8)
+    bio = BytesIO()
+    fig.savefig(bio, format="png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    bio.seek(0)
+    return bio
 
 
 def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_df: pd.DataFrame | None, worms_df: pd.DataFrame | None, parcel_df: pd.DataFrame | None, x_col: str, y_col: str) -> None:
