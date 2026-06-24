@@ -18,7 +18,7 @@ worms.parquet           # or worms.csv
 manifest.json
 ```
 
-The app repairs QR metadata from `qr_text` / `qr_raw`, including QR strings with optional suffixes after the numeric sample ID, for example:
+The app repairs QR metadata from `qr_text` / `qr_raw`. In Res4StRes QR strings, `R4S` is the project code and the following number is the unique genotype identifier:
 
 ```text
 Plot72_Spalte2_Reihe12_R4S_197_S
@@ -37,13 +37,18 @@ streamlit run streamlit_app.py
 - **3D bars**: orthographic 3D bar view with adjustable height transform.
 - **Counter grid**: pivot table for the selected metric.
 - **Rows**: filtered image-summary table with CSV export.
+- **Genotypes**: one-row-per-R4S genotype phenotypes, paired ascending rankings, selectable traits, contrasting-end highlights, and CSV export.
 - **Trend analysis**: aggregate a metric along row, column, plot, or sample axis; plot trend lines and compute slope / intercept / R².
-- **Clustering**: lightweight k-means clustering on selected numeric features. Includes grid-cell cluster map, PCA preview, cluster profiles, and assignment export.
+- **Clustering**: multivariate two-state larval GMM with field maps, PCA diagnostics, class profiles, and assignment export.
 - **QC / missing**: shows images without readable or complete QR metadata, missing QR fields, missing grid parcels, duplicate parcel assignments, and auxiliary table inventory.
 
 ## Notes
 
-The clustering implementation is intentionally dependency-light and uses NumPy only; no scikit-learn dependency is required. Metrics that end in spatial pixel units can be converted to metric units using the sidebar scale setting.
+The clustering implementation is intentionally dependency-light and uses NumPy only; no scikit-learn dependency is required.
+
+## QR-derived physical scaling
+
+Metric dimensions use `pixel_scale_mm_per_px_working` for each image and larval row. If that field is unavailable or invalid, the app uses the documented 0.14 mm/working-pixel fallback. The Rows, Genotypes, and GMM views report the scale source or the number of fallback-scaled observations. Area metrics use the squared per-image scale.
 
 ## Plant-weight normalization
 
@@ -54,7 +59,7 @@ The app joins the metadata to analyzed image rows using:
 qr_plot      -> parcel_plot
 qr_spalte    -> parcel_spalte
 qr_reihe     -> parcel_reihe
-qr_sample_id -> parcel_r4s
+R4S genotype (`qr_sample_id`) -> `parcel_r4s`
 ```
 
 The most important field is `plant_weight_kg`, derived from the source `weight` column in grams.

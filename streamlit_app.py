@@ -24,8 +24,8 @@ DISPLAY_NAMES = {
     "qr_spalte": "Column",
     "qr_reihe": "Row",
     "qr_plot": "Plot",
-    "qr_condition": "Condition",
-    "qr_sample_id": "Sample ID",
+    "qr_condition": "Project code",
+    "qr_sample_id": "R4S genotype",
     "qr_extra_suffix": "QR suffix",
     "qr_text": "QR text",
     "qr_raw": "Raw QR text",
@@ -72,10 +72,29 @@ DISPLAY_NAMES = {
     "larvae_in_tray_manual": "Manual larvae/tray note",
     "plot_trap_disassemble": "Plot/trap disassembly note",
     "parcel_weight_match": "Plant-weight metadata matched",
-    "parcel_r4s": "Parcel R4S/sample ID",
+    "parcel_r4s": "R4S genotype",
     "parcel_plot": "Parcel plot",
     "parcel_spalte": "Parcel column",
     "parcel_reihe": "Parcel row",
+    "scale_mm_per_px_used": "Scale used (mm/px)",
+    "scale_source": "Scale source",
+    "scale_is_qr_derived": "QR-derived scale available",
+    "genotype_id": "R4S genotype",
+    "count_abs": "Mean larvae per image",
+    "count_sd": "Repeat-image count SD",
+    "larvae_per_plant": "Larvae per plant",
+    "larvae_per_kg": "Larvae per kg plant weight",
+    "mean_len_mm": "Mean skeleton length (mm)",
+    "sd_len_mm": "Skeleton length SD (mm)",
+    "mean_area_mm2": "Mean projected area (mm^2)",
+    "repeat_count_cv": "Repeat-image count CV",
+    "n_images": "Images",
+    "n_larvae": "Larval detections",
+    "qr_scaled_images": "QR-scaled images",
+    "fallback_scaled_images": "Fallback-scaled images",
+    "gmm_size1_count_mean": "Mean GMM Size 1 count per image",
+    "gmm_size2_count_mean": "Mean GMM Size 2 count per image",
+    "gmm_total_count_mean": "Mean GMM-classified count per image",
 }
 
 METRIC_COLOR_SCALES = {
@@ -125,8 +144,8 @@ QR_PREFIX_RE = re.compile(
 def main() -> None:
     st.title("Larvae QR Grid Explorer")
     st.caption(
-        "Flat GitHub/Streamlit version. Loads image_summary.parquet or image_summary.csv from the repository root, "
-        "repairs QR row/column fields from the decoded QR text, supports grid maps, trend analysis, clustering, and QC/missing-field diagnostics."
+        "Loads the QR-linked larval database, applies per-image QR calibration, and provides field, genotype, "
+        "morphometric, size-state, and quality-control views."
     )
 
     try:
@@ -138,9 +157,14 @@ def main() -> None:
     summary_df = repair_qr_metadata(summary_df)
     parcel_df, parcel_source_label = load_parcel_metadata()
     summary_df = attach_parcel_metadata(summary_df, parcel_df)
+    summary_df = add_scale_columns(summary_df, fallback_mm_per_px=DEFAULT_MM_PER_PX)
     images_df, images_source_label = load_optional_table("images")
     worms_df, worms_source_label = load_optional_table("worms")
-    summary_df, worms_df, gmm_info = attach_gmm_size_classes(summary_df, worms_df, mm_per_px=DEFAULT_MM_PER_PX)
+    summary_df, worms_df, gmm_info = attach_gmm_size_classes(
+        summary_df,
+        worms_df,
+        fallback_mm_per_px=DEFAULT_MM_PER_PX,
+    )
     summary_df = add_weight_normalized_columns(summary_df)
 
     if summary_df.empty:
@@ -191,15 +215,18 @@ def main() -> None:
             format_func=lambda v: "Pixels" if v == "pixels" else "Metric dimensions",
             help="Pixel mode shows the raw working-pixel values. Metric mode converts length-like metrics to mm and area-like metrics to mm².",
         )
-        mm_per_px = st.number_input(
-            "Scale factor (mm/px)",
+        fallback_mm_per_px = st.number_input(
+            "Fallback scale (mm/px)",
             min_value=0.0001,
             max_value=100.0,
             value=DEFAULT_MM_PER_PX,
             step=0.01,
             format="%.4f",
-            help="Conversion factor for one working pixel. Default is 0.14 mm/px.",
+            help="Used only when an image has no valid QR-derived working-pixel scale.",
+            disabled=True,
         )
+        n_qr_scale = int(filtered.get("scale_is_qr_derived", pd.Series(False, index=filtered.index)).fillna(False).sum())
+        st.caption(f"QR-derived scale: {n_qr_scale:,}/{len(filtered):,} images; fallback: {len(filtered) - n_qr_scale:,}.")
 
         st.header("Plant-weight normalization")
         weight_available = "plant_weight_kg" in filtered.columns and pd.to_numeric(filtered.get("plant_weight_kg"), errors="coerce").gt(0).any()
@@ -259,7 +286,7 @@ def main() -> None:
 
     filtered_for_analysis = analysis_df
     grid_assigned_mask = coordinates_available(filtered_for_analysis, x_col, y_col)
-    grid = make_grid(filtered_for_analysis, x_col=x_col, y_col=y_col, metric=metric, agg=agg, unit_mode=unit_mode, mm_per_px=mm_per_px)
+    grid = make_grid(filtered_for_analysis, x_col=x_col, y_col=y_col, metric=metric, agg=agg, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px)
 
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Total images", f"{len(filtered_for_analysis):,}")
@@ -279,8 +306,8 @@ def main() -> None:
             "They remain in the total image and larva counts, but are omitted from the grid plots."
         )
 
-    tab_map, tab_3d, tab_table, tab_rows, tab_metadata, tab_trend, tab_cluster, tab_qc = st.tabs(
-        ["2D map", "3D bars", "Counter grid", "Rows", "Metadata maps", "Trend analysis", "Clustering", "QC / missing"]
+    tab_map, tab_3d, tab_table, tab_rows, tab_genotype, tab_metadata, tab_trend, tab_cluster, tab_qc = st.tabs(
+        ["2D map", "3D bars", "Counter grid", "Rows", "Genotypes", "Metadata maps", "Trend analysis", "Clustering", "QC / missing"]
     )
 
     with tab_map:
@@ -315,12 +342,12 @@ def main() -> None:
 
     with tab_rows:
         columns_to_show = unique_existing_columns(
-            [y_col, x_col, metric, "count", "count_absolute", "count_per_kg_plant_weight", "plant_weight_kg", "plant_weight_g", "n_plants", "qr_plot", "qr_condition", "qr_sample_id", "qr_extra_suffix", "qr_text", "original_filename", "output_basename"],
+            [y_col, x_col, metric, "count", "count_absolute", "count_per_kg_plant_weight", "plant_weight_kg", "plant_weight_g", "n_plants", "qr_plot", "qr_condition", "qr_sample_id", "scale_mm_per_px_used", "scale_source", "qr_extra_suffix", "qr_text", "original_filename", "output_basename"],
             filtered_for_analysis.columns,
         )
         extra = [c for c in filtered_for_analysis.columns if c not in columns_to_show]
         rows_df = filtered_for_analysis[columns_to_show + extra[:25]].copy()
-        rows_df = convert_dataframe_units(rows_df, unit_mode=unit_mode, mm_per_px=mm_per_px)
+        rows_df = convert_dataframe_units(rows_df, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px)
         rows_df = rename_for_display(rows_df, unit_mode=unit_mode)
         st.dataframe(rows_df, use_container_width=True, height=500)
         st.download_button(
@@ -329,6 +356,27 @@ def main() -> None:
             file_name="filtered_image_summary.csv",
             mime="text/csv",
         )
+        per_larva_mm = build_per_larva_mm_table(worms_df, fallback_mm_per_px=fallback_mm_per_px)
+        if not per_larva_mm.empty:
+            st.markdown("**Per-larva measurements (QR-calibrated, mm)**")
+            st.caption(
+                f"{len(per_larva_mm):,} individual larvae. Lengths in mm and areas in mm2, computed "
+                "per larva from the per-image QR-derived scale (raw pixel values and scale provenance kept "
+                "alongside). One row per larva — the complete measurement table for collaborators."
+            )
+            st.download_button(
+                "Download per-larva measurements (QR-calibrated mm) as CSV",
+                per_larva_mm.to_csv(index=False).encode("utf-8"),
+                file_name="per_larva_measurements_qr_mm.csv",
+                mime="text/csv",
+            )
+
+    with tab_genotype:
+        render_genotype_analysis(
+            filtered_for_analysis,
+            worms_df=worms_df,
+            fallback_mm_per_px=fallback_mm_per_px,
+        )
 
     with tab_metadata:
         render_metadata_maps(
@@ -336,16 +384,16 @@ def main() -> None:
             x_col=x_col,
             y_col=y_col,
             unit_mode=unit_mode,
-            mm_per_px=mm_per_px,
+            mm_per_px=fallback_mm_per_px,
             z_scale=z_scale,
             z_height_fraction=z_height_fraction,
         )
 
     with tab_trend:
-        render_trend_analysis(filtered_for_analysis, metric_cols=metric_cols, default_metric=default_metric, unit_mode=unit_mode, mm_per_px=mm_per_px)
+        render_trend_analysis(filtered_for_analysis, metric_cols=metric_cols, default_metric=default_metric, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px)
 
     with tab_cluster:
-        render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=mm_per_px, worms_df=worms_df, gmm_info=gmm_info)
+        render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px, worms_df=worms_df, gmm_info=gmm_info)
 
     with tab_qc:
         render_qc_analysis(summary_df, filtered, images_df, worms_df, parcel_df, x_col=x_col, y_col=y_col)
@@ -442,6 +490,38 @@ def load_parcel_metadata() -> tuple[pd.DataFrame | None, str | None]:
     return None, None
 
 
+def load_genotype_names() -> dict:
+    """Optional R4S -> genotype name lookup.
+
+    Reads ``genotype_names.csv`` (or ``.parquet``) placed next to ``streamlit_app.py``.
+    Column names are flexible: the key may be one of
+    {genotype_id, r4s, parcel_r4s, sample_id, qr_sample_id} and the name one of
+    {genotype_name, name, sorte, genotype, variety}. Returns {{R4S int: name}}.
+    If the file is absent the genotype tab simply falls back to R4S numbers.
+    """
+    for fname in ("genotype_names.csv", "genotype_names.parquet"):
+        path = APP_DIR / fname
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
+        except Exception:
+            continue
+        cols = {str(c).strip().lower(): c for c in df.columns}
+        key_col = next((cols[k] for k in ("genotype_id", "r4s", "parcel_r4s", "sample_id", "qr_sample_id") if k in cols), None)
+        name_col = next((cols[k] for k in ("genotype_name", "name", "sorte", "genotype", "variety") if k in cols), None)
+        if key_col is None or name_col is None:
+            continue
+        keys = pd.to_numeric(df[key_col], errors="coerce")
+        out: dict[int, str] = {}
+        for k, v in zip(keys, df[name_col]):
+            if pd.notna(k) and pd.notna(v) and str(v).strip():
+                out[int(k)] = str(v).strip()
+        if out:
+            return out
+    return {}
+
+
 def attach_parcel_metadata(summary_df: pd.DataFrame, parcel_df: pd.DataFrame | None) -> pd.DataFrame:
     """Attach plant weight / parcel metadata to image summary rows.
 
@@ -476,6 +556,31 @@ def attach_parcel_metadata(summary_df: pd.DataFrame, parcel_df: pd.DataFrame | N
     out = out.merge(parcels, left_on=join_left, right_on=join_right, how="left", suffixes=("", "_parcel"))
     out["parcel_weight_match"] = pd.to_numeric(out.get("plant_weight_kg"), errors="coerce").gt(0)
     return add_weight_normalized_columns(out)
+
+
+def resolved_scale_series(df: pd.DataFrame, fallback_mm_per_px: float = DEFAULT_MM_PER_PX) -> tuple[pd.Series, pd.Series]:
+    """Return a row-aligned working-pixel scale and whether it came from the QR code."""
+    scale = pd.Series(np.nan, index=df.index, dtype=float)
+    for col in [
+        "pixel_scale_mm_per_px_working",
+        "mean_pixel_scale_mm_per_px_working",
+        "median_pixel_scale_mm_per_px_working",
+    ]:
+        if col in df.columns:
+            candidate = pd.to_numeric(df[col], errors="coerce")
+            valid = candidate.gt(0) & np.isfinite(candidate)
+            scale = scale.where(scale.notna(), candidate.where(valid))
+    qr_derived = scale.notna()
+    return scale.fillna(float(fallback_mm_per_px)), qr_derived
+
+
+def add_scale_columns(df: pd.DataFrame, fallback_mm_per_px: float = DEFAULT_MM_PER_PX) -> pd.DataFrame:
+    out = df.copy()
+    scale, qr_derived = resolved_scale_series(out, fallback_mm_per_px=fallback_mm_per_px)
+    out["scale_mm_per_px_used"] = scale
+    out["scale_is_qr_derived"] = qr_derived
+    out["scale_source"] = np.where(qr_derived, "QR-derived", f"fallback {float(fallback_mm_per_px):.4f} mm/px")
+    return out
 
 
 def add_weight_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -528,6 +633,43 @@ def set_count_display_names(normalize_counts_by_weight: bool) -> None:
         DISPLAY_NAMES["gmm_total_count"] = "GMM-classified larva count"
         DISPLAY_NAMES["gmm_size1_count"] = "GMM Size 1 count"
         DISPLAY_NAMES["gmm_size2_count"] = "GMM Size 2 count"
+
+
+def build_per_larva_mm_table(worms_df, fallback_mm_per_px: float = DEFAULT_MM_PER_PX) -> pd.DataFrame:
+    """One row per larva with QR-calibrated physical (mm / mm2) measurements for export."""
+    if worms_df is None or len(worms_df) == 0:
+        return pd.DataFrame()
+    w = repair_qr_metadata(worms_df)
+    w = add_scale_columns(w, fallback_mm_per_px=fallback_mm_per_px)
+    scale = pd.to_numeric(w["scale_mm_per_px_used"], errors="coerce")
+    out = pd.DataFrame(index=w.index)
+    for c in ["output_basename", "original_filename", "qr_text", "qr_plot",
+              "qr_spalte", "qr_reihe", "qr_condition", "qr_sample_id", "worm_id"]:
+        if c in w.columns:
+            out[c] = w[c]
+    out = out.rename(columns={"qr_sample_id": "R4S_genotype"})
+    length_map = {
+        "skeleton_length_px": "skeleton_length_mm",
+        "axis_major_px": "axis_major_mm",
+        "axis_minor_px": "axis_minor_mm",
+        "perimeter_px": "perimeter_mm",
+        "equivalent_diameter_area_px": "equivalent_diameter_mm",
+        "mean_skeleton_width_px": "mean_skeleton_width_mm",
+    }
+    for src, dst in length_map.items():
+        if src in w.columns:
+            out[dst] = pd.to_numeric(w[src], errors="coerce") * scale
+    if "area_px" in w.columns:
+        out["area_mm2"] = pd.to_numeric(w["area_px"], errors="coerce") * scale * scale
+    for c in ["aspect_ratio", "eccentricity", "solidity"]:
+        if c in w.columns:
+            out[c] = pd.to_numeric(w[c], errors="coerce")
+    for c in ["area_px", "skeleton_length_px", "axis_major_px", "axis_minor_px",
+              "perimeter_px", "equivalent_diameter_area_px", "mean_skeleton_width_px",
+              "scale_mm_per_px_used", "scale_is_qr_derived", "scale_source"]:
+        if c in w.columns:
+            out[c] = w[c]
+    return out
 
 
 def repair_qr_metadata(df: pd.DataFrame) -> pd.DataFrame:
@@ -646,8 +788,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     filtered = df.copy()
     for col, label, max_distinct in [
         ("qr_plot", "Plot", 200),
-        ("qr_condition", "Condition", 100),
-        ("qr_sample_id", "Sample ID", 60),
+        ("qr_condition", "Project code", 100),
     ]:
         if col in filtered.columns:
             options = sorted_options_with_missing(filtered[col])
@@ -656,6 +797,17 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
                 filtered = filter_including_missing(filtered, col, selected)
             else:
                 st.caption(f"{label} filter hidden because there are {len(options)} distinct values.")
+    if "qr_sample_id" in filtered.columns:
+        options = sorted_options_with_missing(filtered["qr_sample_id"])
+        selected = st.multiselect(
+            "R4S genotype",
+            options,
+            default=[],
+            format_func=lambda x: MISSING_LABEL if x == MISSING_LABEL else f"R4S-{format_axis_label(x)}",
+            help="Leave empty to include all genotypes.",
+        )
+        if selected:
+            filtered = filter_including_missing(filtered, "qr_sample_id", selected)
     return filtered
 
 
@@ -731,10 +883,18 @@ def coordinates_available(df: pd.DataFrame, x_col: str, y_col: str) -> pd.Series
 
 
 def make_grid(df: pd.DataFrame, x_col: str, y_col: str, metric: str, agg: str, unit_mode: str, mm_per_px: float) -> pd.DataFrame:
-    work = df[[x_col, y_col, metric]].copy()
+    work_cols = unique_existing_columns([x_col, y_col, metric, "scale_mm_per_px_used"], df.columns)
+    work = df[work_cols].copy()
     work[x_col] = pd.to_numeric(work[x_col], errors="coerce") if x_col in {"qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id"} else work[x_col]
     work[y_col] = pd.to_numeric(work[y_col], errors="coerce") if y_col in {"qr_plot", "qr_spalte", "qr_reihe", "qr_sample_id"} else work[y_col]
-    work[metric] = convert_metric_series(metric, work[metric], unit_mode=unit_mode, mm_per_px=mm_per_px)
+    scale_values = work.get("scale_mm_per_px_used")
+    work[metric] = convert_metric_series(
+        metric,
+        work[metric],
+        unit_mode=unit_mode,
+        mm_per_px=mm_per_px,
+        scale_values=scale_values,
+    )
     work = work.dropna(subset=[x_col, y_col, metric])
     if work.empty:
         return pd.DataFrame(columns=[y_col, x_col, "value"])
@@ -1081,11 +1241,22 @@ def metric_unit_exponent(metric: object) -> int:
     return 0
 
 
-def convert_metric_series(metric: object, values: pd.Series, unit_mode: str, mm_per_px: float) -> pd.Series:
+def convert_metric_series(
+    metric: object,
+    values: pd.Series,
+    unit_mode: str,
+    mm_per_px: float,
+    scale_values: pd.Series | None = None,
+) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
     exponent = metric_unit_exponent(metric)
     if unit_mode == "metric" and exponent > 0:
-        return numeric * (float(mm_per_px) ** exponent)
+        if scale_values is None:
+            scale = pd.Series(float(mm_per_px), index=numeric.index, dtype=float)
+        else:
+            scale = pd.to_numeric(scale_values, errors="coerce").reindex(numeric.index).fillna(float(mm_per_px))
+            scale = scale.where(scale.gt(0), float(mm_per_px))
+        return numeric * scale.pow(exponent)
     return numeric
 
 
@@ -1093,9 +1264,16 @@ def convert_dataframe_units(df: pd.DataFrame, unit_mode: str, mm_per_px: float) 
     if unit_mode != "metric":
         return df
     out = df.copy()
+    scale_values = out.get("scale_mm_per_px_used")
     for col in out.columns:
         if metric_unit_exponent(col) > 0 and pd.api.types.is_numeric_dtype(out[col]):
-            out[col] = convert_metric_series(col, out[col], unit_mode=unit_mode, mm_per_px=mm_per_px)
+            out[col] = convert_metric_series(
+                col,
+                out[col],
+                unit_mode=unit_mode,
+                mm_per_px=mm_per_px,
+                scale_values=scale_values,
+            )
     return out
 
 
@@ -1317,9 +1495,16 @@ def render_metadata_trend_pair(df: pd.DataFrame, meta_metric: str, x_col: str, y
     fig = go.Figure()
     trend_tables: list[pd.DataFrame] = []
     for axis in axes:
-        work = df[[axis, meta_metric]].copy()
+        work_cols = unique_existing_columns([axis, meta_metric, "scale_mm_per_px_used"], df.columns)
+        work = df[work_cols].copy()
         work["axis_value"] = pd.to_numeric(work[axis], errors="coerce")
-        work["metric_value"] = convert_metric_series(meta_metric, work[meta_metric], unit_mode=unit_mode, mm_per_px=mm_per_px)
+        work["metric_value"] = convert_metric_series(
+            meta_metric,
+            work[meta_metric],
+            unit_mode=unit_mode,
+            mm_per_px=mm_per_px,
+            scale_values=work.get("scale_mm_per_px_used"),
+        )
         work = work.dropna(subset=["axis_value", "metric_value"])
         if work.empty:
             continue
@@ -1380,9 +1565,18 @@ def render_trend_analysis(df: pd.DataFrame, metric_cols: list[str], default_metr
         agg = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "count"], index=0, key="trend_agg")
 
     work_cols = [trend_axis, trend_metric] + ([] if group_col == "<none>" else [group_col])
+    if "scale_mm_per_px_used" in df.columns:
+        work_cols.append("scale_mm_per_px_used")
+    work_cols = unique_existing_columns(work_cols, df.columns)
     work = df[work_cols].copy()
     work["axis_value"] = pd.to_numeric(work[trend_axis], errors="coerce")
-    work["metric_value"] = convert_metric_series(trend_metric, work[trend_metric], unit_mode=unit_mode, mm_per_px=mm_per_px)
+    work["metric_value"] = convert_metric_series(
+        trend_metric,
+        work[trend_metric],
+        unit_mode=unit_mode,
+        mm_per_px=mm_per_px,
+        scale_values=work.get("scale_mm_per_px_used"),
+    )
     work = work.dropna(subset=["axis_value", "metric_value"])
     if work.empty:
         st.warning("No finite values are available for this trend selection.")
@@ -1456,6 +1650,243 @@ def trend_regression_table(trend: pd.DataFrame, group_col: str | None = None) ->
 
 
 
+def _genotype_id_series(df: pd.DataFrame) -> pd.Series:
+    genotype = pd.Series(np.nan, index=df.index, dtype=float)
+    for col in ["qr_sample_id", "parcel_r4s"]:
+        if col in df.columns:
+            candidate = pd.to_numeric(df[col], errors="coerce")
+            genotype = genotype.where(genotype.notna(), candidate)
+    return genotype
+
+
+def build_genotype_traits(
+    summary_df: pd.DataFrame,
+    worms_df: pd.DataFrame | None,
+    fallback_mm_per_px: float = DEFAULT_MM_PER_PX,
+) -> pd.DataFrame:
+    """Aggregate technical image repeats and larval measurements to one row per R4S genotype."""
+    summary = add_scale_columns(summary_df, fallback_mm_per_px=fallback_mm_per_px)
+    summary["genotype_id"] = _genotype_id_series(summary)
+    summary = summary.dropna(subset=["genotype_id"]).copy()
+    if summary.empty:
+        return pd.DataFrame()
+    summary["genotype_id"] = summary["genotype_id"].astype(int)
+
+    count_col = "count_absolute" if "count_absolute" in summary.columns else "count"
+    summary["_count_for_genotype"] = pd.to_numeric(summary.get(count_col), errors="coerce")
+    summary["_qr_scale_image"] = summary["scale_is_qr_derived"].fillna(False).astype(int)
+    group = summary.groupby("genotype_id", dropna=True)
+    traits = group.agg(
+        qr_plot=("qr_plot", "first"),
+        qr_spalte=("qr_spalte", "first"),
+        qr_reihe=("qr_reihe", "first"),
+        project_code=("qr_condition", "first"),
+        n_images=("output_basename", "nunique"),
+        count_abs=("_count_for_genotype", "mean"),
+        count_sd=("_count_for_genotype", "std"),
+        plant_weight_kg=("plant_weight_kg", "median"),
+        n_plants=("n_plants", "median"),
+        qr_scaled_images=("_qr_scale_image", "sum"),
+    ).reset_index()
+    traits["fallback_scaled_images"] = traits["n_images"] - traits["qr_scaled_images"]
+    traits["repeat_count_cv"] = traits["count_sd"] / traits["count_abs"].replace(0, np.nan)
+    traits["larvae_per_plant"] = traits["count_abs"] / traits["n_plants"].replace(0, np.nan)
+    traits["larvae_per_kg"] = traits["count_abs"] / traits["plant_weight_kg"].replace(0, np.nan)
+
+    for source, target in [
+        ("gmm_size1_count", "gmm_size1_count_mean"),
+        ("gmm_size2_count", "gmm_size2_count_mean"),
+        ("gmm_total_count", "gmm_total_count_mean"),
+    ]:
+        if source in summary.columns:
+            means = pd.to_numeric(summary[source], errors="coerce").groupby(summary["genotype_id"]).mean()
+            traits[target] = traits["genotype_id"].map(means)
+
+    if {"gmm_size1_count", "gmm_size2_count"}.issubset(summary.columns):
+        size1 = pd.to_numeric(summary["gmm_size1_count"], errors="coerce").groupby(summary["genotype_id"]).sum()
+        size2 = pd.to_numeric(summary["gmm_size2_count"], errors="coerce").groupby(summary["genotype_id"]).sum()
+        fraction = size2 / (size1 + size2).replace(0, np.nan)
+        traits["gmm_size2_fraction"] = traits["genotype_id"].map(fraction)
+
+    if worms_df is not None and not worms_df.empty:
+        worms = repair_qr_metadata(worms_df.copy())
+        if "output_basename" in summary.columns and "output_basename" in worms.columns:
+            selected_images = set(summary["output_basename"].dropna().astype(str))
+            worms = worms[worms["output_basename"].astype(str).isin(selected_images)].copy()
+        worms = add_scale_columns(worms, fallback_mm_per_px=fallback_mm_per_px)
+        worms["genotype_id"] = _genotype_id_series(worms)
+        worms = worms.dropna(subset=["genotype_id"]).copy()
+        if not worms.empty:
+            worms["genotype_id"] = worms["genotype_id"].astype(int)
+            scale = pd.to_numeric(worms["scale_mm_per_px_used"], errors="coerce").fillna(float(fallback_mm_per_px))
+            if "skeleton_length_mm" not in worms.columns:
+                worms["skeleton_length_mm"] = pd.to_numeric(worms.get("skeleton_length_px"), errors="coerce") * scale
+            if "area_mm2" not in worms.columns:
+                worms["area_mm2"] = pd.to_numeric(worms.get("area_px"), errors="coerce") * scale.pow(2)
+            larval = worms.groupby("genotype_id", dropna=True).agg(
+                n_larvae=("genotype_id", "size"),
+                mean_len_mm=("skeleton_length_mm", "mean"),
+                sd_len_mm=("skeleton_length_mm", "std"),
+                mean_area_mm2=("area_mm2", "mean"),
+            ).reset_index()
+            traits = traits.merge(larval, on="genotype_id", how="left")
+
+    numeric_cols = [c for c in traits.columns if c != "project_code"]
+    for col in numeric_cols:
+        traits[col] = pd.to_numeric(traits[col], errors="coerce")
+    names = load_genotype_names()
+    if names:
+        traits["genotype_name"] = traits["genotype_id"].map(names)
+    return traits.sort_values("genotype_id").reset_index(drop=True)
+
+
+def make_genotype_rank_figure(
+    traits: pd.DataFrame,
+    metric: str,
+    ascending: bool = True,
+    highlight_n: int = 5,
+) -> go.Figure:
+    plot = traits.dropna(subset=[metric, "genotype_id"]).copy()
+    if plot.empty:
+        return empty_figure("No genotype values are available for this metric")
+    plot = plot.sort_values([metric, "genotype_id"], ascending=[ascending, True]).reset_index(drop=True)
+    plot["rank"] = np.arange(1, len(plot) + 1)
+    if "genotype_name" in plot.columns and plot["genotype_name"].notna().any():
+        plot["genotype_label"] = plot.apply(
+            lambda r: (f"{r['genotype_name']} (R4S-{int(r['genotype_id'])})"
+                       if pd.notna(r.get("genotype_name")) else f"R4S-{int(r['genotype_id'])}"),
+            axis=1)
+    else:
+        plot["genotype_label"] = plot["genotype_id"].map(lambda value: f"R4S-{int(value)}")
+    color = np.full(len(plot), "#159A8C", dtype=object)
+    if highlight_n > 0:
+        color[:highlight_n] = "#7651A8"
+        color[-highlight_n:] = "#E36C19"
+    endpoint = np.zeros(len(plot), dtype=bool)
+    if highlight_n > 0:
+        endpoint[:highlight_n] = True
+        endpoint[-highlight_n:] = True
+    text_values = np.where(endpoint, plot["genotype_label"], "")
+    def plot_numeric(name: str) -> pd.Series:
+        if name in plot.columns:
+            return pd.to_numeric(plot[name], errors="coerce")
+        return pd.Series(np.nan, index=plot.index)
+
+    custom = np.column_stack([
+        plot["genotype_label"],
+        plot_numeric("qr_plot"),
+        plot_numeric("qr_spalte"),
+        plot_numeric("qr_reihe"),
+        plot_numeric("n_images"),
+        plot_numeric("n_larvae"),
+    ])
+    fig = go.Figure(go.Scatter(
+        x=plot["rank"],
+        y=plot[metric],
+        mode="markers+text",
+        marker=dict(size=7, color=color, line=dict(width=0)),
+        text=text_values,
+        textposition="top center",
+        textfont=dict(size=9),
+        customdata=custom,
+        hovertemplate=(
+            "%{customdata[0]}<br>"
+            f"{display_name(metric, 'metric')}=%{{y:.4g}}<br>"
+            "Plot=%{customdata[1]:.0f}, column=%{customdata[2]:.0f}, row=%{customdata[3]:.0f}<br>"
+            "Images=%{customdata[4]:.0f}, larval detections=%{customdata[5]:.0f}<extra></extra>"
+        ),
+    ))
+    fig.update_layout(
+        title=display_name(metric, "metric"),
+        xaxis_title="Genotype rank",
+        yaxis_title=display_name(metric, "metric"),
+        height=430,
+        margin=dict(l=55, r=20, t=55, b=50),
+        showlegend=False,
+    )
+    return fig
+
+
+def render_genotype_analysis(
+    summary_df: pd.DataFrame,
+    worms_df: pd.DataFrame | None,
+    fallback_mm_per_px: float = DEFAULT_MM_PER_PX,
+) -> None:
+    st.subheader("R4S genotype phenotypes")
+    traits = build_genotype_traits(summary_df, worms_df, fallback_mm_per_px=fallback_mm_per_px)
+    if traits.empty:
+        st.warning("No R4S genotype identifiers are available in the current selection.")
+        return
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Genotypes", f"{len(traits):,}")
+    k2.metric("Images", f"{int(traits['n_images'].fillna(0).sum()):,}")
+    n_larvae = int(traits.get("n_larvae", pd.Series(dtype=float)).fillna(0).sum())
+    k3.metric("Larval detections", f"{n_larvae:,}")
+    qr_images = int(traits["qr_scaled_images"].fillna(0).sum())
+    all_images = int(traits["n_images"].fillna(0).sum())
+    k4.metric("QR-scaled images", f"{qr_images:,}/{all_images:,}")
+    st.caption(
+        "Each point is one R4S genotype/field plot. Repeated photographs are technical image repeats: "
+        "counts are averaged across images, while larval size summarizes QR-scaled detections. "
+        "Purple and orange labels mark the selected number of genotypes at the two ends of each ranking."
+    )
+
+    overview_cols = st.columns(2)
+    for container, overview_metric in zip(overview_cols, ["larvae_per_plant", "mean_len_mm"]):
+        with container:
+            if overview_metric in traits.columns:
+                st.plotly_chart(
+                    make_genotype_rank_figure(traits, overview_metric, ascending=True, highlight_n=5),
+                    use_container_width=True,
+                    key=f"genotype_overview_{overview_metric}",
+                )
+
+    rank_metrics = [
+        c for c in [
+            "larvae_per_plant", "count_abs", "larvae_per_kg", "mean_len_mm",
+            "mean_area_mm2", "gmm_size2_fraction", "repeat_count_cv",
+        ]
+        if c in traits.columns and pd.to_numeric(traits[c], errors="coerce").notna().any()
+    ]
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        metric = st.selectbox(
+            "Ranked phenotype",
+            rank_metrics,
+            index=index_or_zero(rank_metrics, "larvae_per_plant"),
+            format_func=lambda c: display_name(c, "metric"),
+            key="genotype_rank_metric",
+        )
+    with c2:
+        order = st.segmented_control("Order", ["Ascending", "Descending"], default="Ascending", key="genotype_rank_order")
+    with c3:
+        highlight_n = st.number_input("Highlight at each end", min_value=0, max_value=15, value=5, step=1)
+    ascending = order != "Descending"
+    st.plotly_chart(
+        make_genotype_rank_figure(traits, metric, ascending=ascending, highlight_n=int(highlight_n)),
+        use_container_width=True,
+        key="genotype_custom_rank_plot",
+    )
+
+    ranked = traits.sort_values([metric, "genotype_id"], ascending=[ascending, True]).reset_index(drop=True)
+    ranked.insert(0, "rank", np.arange(1, len(ranked) + 1))
+    ranked["R4S_genotype"] = ranked["genotype_id"].map(lambda value: f"R4S-{int(value)}")
+    table_cols = unique_existing_columns([
+        "rank", "R4S_genotype", "genotype_name", metric, "count_abs", "larvae_per_plant", "plant_weight_kg",
+        "n_plants", "mean_len_mm", "mean_area_mm2", "gmm_size2_fraction",
+        "n_images", "n_larvae", "repeat_count_cv", "qr_scaled_images", "fallback_scaled_images",
+        "qr_plot", "qr_spalte", "qr_reihe",
+    ], ranked.columns)
+    st.dataframe(rename_for_display(ranked[table_cols], unit_mode="metric"), use_container_width=True, height=480)
+    st.download_button(
+        "Download genotype phenotype table",
+        ranked.to_csv(index=False).encode("utf-8"),
+        file_name="r4s_genotype_phenotypes_ranked.csv",
+        mime="text/csv",
+    )
+
+
 # -----------------------------------------------------------------------------
 # Multivariate GMM size classes
 # -----------------------------------------------------------------------------
@@ -1477,7 +1908,11 @@ GMM_LARVA_FEATURES = [
 ]
 
 
-def attach_gmm_size_classes(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None, mm_per_px: float = DEFAULT_MM_PER_PX) -> tuple[pd.DataFrame, pd.DataFrame | None, dict]:
+def attach_gmm_size_classes(
+    summary_df: pd.DataFrame,
+    worms_df: pd.DataFrame | None,
+    fallback_mm_per_px: float = DEFAULT_MM_PER_PX,
+) -> tuple[pd.DataFrame, pd.DataFrame | None, dict]:
     """Fit a two-class multivariate larval GMM and merge image-level size-class counts.
 
     The model is deliberately implemented in NumPy rather than scikit-learn so the
@@ -1492,7 +1927,7 @@ def attach_gmm_size_classes(summary_df: pd.DataFrame, worms_df: pd.DataFrame | N
 
     worms = repair_qr_metadata(worms_df.copy())
     try:
-        worms, info = compute_larva_gmm_classes(worms, mm_per_px=mm_per_px)
+        worms, info = compute_larva_gmm_classes(worms, fallback_mm_per_px=fallback_mm_per_px)
     except Exception as exc:
         info = {"available": False, "message": f"GMM analysis failed: {exc}"}
         return out_summary, worms_df, info
@@ -1523,20 +1958,24 @@ def attach_gmm_size_classes(summary_df: pd.DataFrame, worms_df: pd.DataFrame | N
 
 
 @st.cache_data(show_spinner=False)
-def compute_larva_gmm_classes(worms_df: pd.DataFrame, mm_per_px: float = DEFAULT_MM_PER_PX) -> tuple[pd.DataFrame, dict]:
-    worms = worms_df.copy()
+def compute_larva_gmm_classes(
+    worms_df: pd.DataFrame,
+    fallback_mm_per_px: float = DEFAULT_MM_PER_PX,
+) -> tuple[pd.DataFrame, dict]:
+    worms = add_scale_columns(worms_df, fallback_mm_per_px=fallback_mm_per_px)
     if worms.empty:
         return worms, {"available": False, "message": "worms table empty"}
 
     def numeric_col(name: str) -> pd.Series:
         return pd.to_numeric(worms[name], errors="coerce") if name in worms.columns else pd.Series(np.nan, index=worms.index)
 
-    worms["area_mm2"] = numeric_col("area_px") * float(mm_per_px) ** 2
-    worms["skeleton_length_mm"] = numeric_col("skeleton_length_px") * float(mm_per_px)
-    worms["axis_major_mm"] = numeric_col("axis_major_px") * float(mm_per_px)
-    worms["axis_minor_mm"] = numeric_col("axis_minor_px") * float(mm_per_px)
-    worms["perimeter_mm"] = numeric_col("perimeter_px") * float(mm_per_px)
-    worms["equivalent_diameter_area_mm"] = numeric_col("equivalent_diameter_area_px") * float(mm_per_px)
+    scale = pd.to_numeric(worms["scale_mm_per_px_used"], errors="coerce").fillna(float(fallback_mm_per_px))
+    worms["area_mm2"] = numeric_col("area_px") * scale.pow(2)
+    worms["skeleton_length_mm"] = numeric_col("skeleton_length_px") * scale
+    worms["axis_major_mm"] = numeric_col("axis_major_px") * scale
+    worms["axis_minor_mm"] = numeric_col("axis_minor_px") * scale
+    worms["perimeter_mm"] = numeric_col("perimeter_px") * scale
+    worms["equivalent_diameter_area_mm"] = numeric_col("equivalent_diameter_area_px") * scale
 
     features = [c for c in GMM_LARVA_FEATURES if c in worms.columns]
     if len(features) < 4:
@@ -1619,6 +2058,8 @@ def compute_larva_gmm_classes(worms_df: pd.DataFrame, mm_per_px: float = DEFAULT
         "features": features,
         "n_analyzed_larvae": int(len(idx)),
         "n_input_larvae": int(len(worms)),
+        "n_qr_scaled_larvae": int(worms.loc[idx, "scale_is_qr_derived"].fillna(False).sum()),
+        "n_fallback_scaled_larvae": int((~worms.loc[idx, "scale_is_qr_derived"].fillna(False)).sum()),
         "size1_count": int((labels == 0).sum()),
         "size2_count": int((labels == 1).sum()),
         "mean_area_size1_mm2": float(np.nanmean(area[labels == 0])),
@@ -1727,6 +2168,10 @@ def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: 
     c2.metric("GMM Size 1", f"{int(gmm_info.get('size1_count', 0)):,}")
     c3.metric("GMM Size 2", f"{int(gmm_info.get('size2_count', 0)):,}")
     c4.metric("Ambiguous P(Size 2)=0.4–0.6", f"{100*float(gmm_info.get('ambiguous_04_06_fraction', np.nan)):.2f}%")
+    st.caption(
+        f"Physical features use per-image QR scaling for {int(gmm_info.get('n_qr_scaled_larvae', 0)):,} analyzed detections; "
+        f"the {DEFAULT_MM_PER_PX:.2f} mm/px fallback is used for {int(gmm_info.get('n_fallback_scaled_larvae', 0)):,}."
+    )
 
     st.markdown("#### Field maps from GMM classes")
     map_metrics = [c for c in ["gmm_total_count", "gmm_size1_count", "gmm_size2_count", "gmm_size2_fraction", "gmm_mean_size2_probability", "gmm_total_count_per_kg_plant_weight", "gmm_size1_count_per_kg_plant_weight", "gmm_size2_count_per_kg_plant_weight"] if c in df.columns]
