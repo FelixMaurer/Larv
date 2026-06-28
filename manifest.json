@@ -10,10 +10,20 @@
     "image_summary_parquet": "data/worm_database/image_summary.parquet"
   },
   "n_images": 608,
-  "n_worms": 32374,
-  "n_image_summary_rows": 608,
+  "n_worms": 30596,
+  "n_image_summary_rows": 610,
   "coordinate_scale": "working_pixels",
   "scale_factor_values": [
     0.5
-  ]
+  ],
+  "correction": {
+    "applied": "2026-06-29",
+    "version": 4,
+    "n_images": 610,
+    "method": "608 corrected set + 2 new images (IMG_0737, IMG_0738, Plot234) segmented with EXACT production config + same corrections",
+    "n_worms_before": 32443,
+    "n_worms_after": 30596,
+    "pct": -5.7,
+    "note": "central estimate, ~+-5% irreducible margin; 2 new images added 2026-06-29"
+  }
 }
