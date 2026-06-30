@@ -12,7 +12,26 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="Larvae QR Grid Explorer", layout="wide")
+st.set_page_config(page_title="Larvae Explorer", layout="wide")
+
+# Auto-assign a unique key to every st.plotly_chart so that identical figures
+# (e.g. empty maps for a project that lacks a metric) never collide on their
+# auto-generated element id. The counter is reset at the start of each run.
+try:
+    _PLOTLY_KEY_STATE  # type: ignore[used-before-def]
+except NameError:
+    _PLOTLY_KEY_STATE = {"n": 0}
+if not getattr(st.plotly_chart, "_auto_key_wrapper", False):
+    _orig_plotly_chart = st.plotly_chart
+
+    def _plotly_chart_unique(*args, **kwargs):
+        if "key" not in kwargs:
+            _PLOTLY_KEY_STATE["n"] += 1
+            kwargs["key"] = f"auto_plotly_{_PLOTLY_KEY_STATE['n']}"
+        return _orig_plotly_chart(*args, **kwargs)
+
+    _plotly_chart_unique._auto_key_wrapper = True
+    st.plotly_chart = _plotly_chart_unique
 
 APP_DIR = Path(__file__).resolve().parent
 GRID_X_DEFAULT = "qr_reihe"   # Row on x-axis
@@ -170,6 +189,7 @@ QR_PREFIX_RE = re.compile(
 
 
 def main() -> None:
+    _PLOTLY_KEY_STATE["n"] = 0  # stable, unique plotly_chart keys per run
     # ---- global project selector ----
     projects = available_projects()
     with st.sidebar:
@@ -1723,18 +1743,26 @@ def build_genotype_traits(
     summary["_count_for_genotype"] = pd.to_numeric(summary.get(count_col), errors="coerce")
     summary["_qr_scale_image"] = summary["scale_is_qr_derived"].fillna(False).astype(int)
     group = summary.groupby("genotype_id", dropna=True)
-    traits = group.agg(
-        qr_plot=("qr_plot", "first"),
-        qr_spalte=("qr_spalte", "first"),
-        qr_reihe=("qr_reihe", "first"),
-        project_code=("qr_condition", "first"),
-        n_images=("output_basename", "nunique"),
-        count_abs=("_count_for_genotype", "mean"),
-        count_sd=("_count_for_genotype", "std"),
-        plant_weight_kg=("plant_weight_kg", "median"),
-        n_plants=("n_plants", "median"),
-        qr_scaled_images=("_qr_scale_image", "sum"),
-    ).reset_index()
+    # Only aggregate columns that exist: project data sets differ (e.g. Malchow has
+    # no plant_weight_kg / n_plants), and a missing label would crash .agg().
+    agg_spec = {
+        "qr_plot": ("qr_plot", "first"),
+        "qr_spalte": ("qr_spalte", "first"),
+        "qr_reihe": ("qr_reihe", "first"),
+        "project_code": ("qr_condition", "first"),
+        "n_images": ("output_basename", "nunique"),
+        "count_abs": ("_count_for_genotype", "mean"),
+        "count_sd": ("_count_for_genotype", "std"),
+        "plant_weight_kg": ("plant_weight_kg", "median"),
+        "n_plants": ("n_plants", "median"),
+        "qr_scaled_images": ("_qr_scale_image", "sum"),
+    }
+    agg_spec = {out: (col, fn) for out, (col, fn) in agg_spec.items() if col in summary.columns}
+    traits = group.agg(**agg_spec).reset_index()
+    for col in ("qr_plot", "qr_spalte", "qr_reihe", "project_code", "n_images",
+                "count_abs", "count_sd", "plant_weight_kg", "n_plants", "qr_scaled_images"):
+        if col not in traits.columns:
+            traits[col] = np.nan
     traits["fallback_scaled_images"] = traits["n_images"] - traits["qr_scaled_images"]
     traits["repeat_count_cv"] = traits["count_sd"] / traits["count_abs"].replace(0, np.nan)
     traits["larvae_per_plant"] = traits["count_abs"] / traits["n_plants"].replace(0, np.nan)
