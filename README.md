@@ -1,8 +1,19 @@
-# Larvae QR Grid Explorer
+# Larvae Explorer (multi-project)
 
-Flat Streamlit app for GitHub / Streamlit Community Cloud.
+Streamlit app for GitHub / Streamlit Community Cloud. It now hosts **two datasets**
+selected from a sidebar "Project / Dataset" control:
 
-Required files in the repository root:
+- **Asendorf — QR-linked** (in `data_asendorf/`) — full plant-weight + genotype features.
+- **Malchow — text-labelled / OCR** (in `data_malchow/`) — field/x/y/R4S grid; pixel units.
+
+**See [`UPLOAD_INSTRUCTIONS.md`](UPLOAD_INSTRUCTIONS.md) for what to push to GitHub and how to deploy.**
+The GMM tab now also reports the **number of size classes** (BIC elbow + AIC/BIC minima
+over k=1..12, with an interactive re-fit). The notes below describe the original
+single-project Asendorf data.
+
+---
+
+Required files per project folder (`data_asendorf/`, `data_malchow/`):
 
 ```text
 streamlit_app.py

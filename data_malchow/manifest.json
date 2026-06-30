@@ -1,0 +1,12 @@
+{
+  "project": "malchow",
+  "n_images": 79,
+  "n_worms": 16018,
+  "axes": {
+    "qr_plot": "Feld",
+    "qr_spalte": "x",
+    "qr_reihe": "y",
+    "qr_sample_id": "R4S"
+  },
+  "note": "Text-labelled (OCR) Malchow larvae. Grid coordinates from label OCR with R4S repeat-consensus; sample id = R4S. Measurements are in pixels (no QR scale calibration), so size classes are operational, not mm."
+}

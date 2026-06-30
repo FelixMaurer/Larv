@@ -20,6 +20,34 @@ GRID_Y_DEFAULT = "qr_spalte"  # Column on y-axis
 DEFAULT_MM_PER_PX = 0.14
 MISSING_LABEL = "<missing>"
 
+# ---- Multi-project support -------------------------------------------------
+# Each project keeps its data in its own subfolder; the sidebar selects between
+# them. Malchow re-uses the qr_* column slots (label_feldnr/x/y/r4s mapped to
+# qr_plot/spalte/reihe/sample_id) so the same machinery works, with relabelled
+# axes. If no data_* subfolder exists the app falls back to a flat layout.
+PROJECTS = {
+    "asendorf": {
+        "label": "Asendorf — QR-linked (oilseed rape)",
+        "dir": "data_asendorf",
+        "title": "Larvae QR Grid Explorer — Asendorf",
+        "axes": {"qr_plot": "Plot", "qr_spalte": "Column", "qr_reihe": "Row"},
+        "has_weight": True,
+    },
+    "malchow": {
+        "label": "Malchow — text-labelled (OCR)",
+        "dir": "data_malchow",
+        "title": "Larvae Text-label Explorer — Malchow",
+        "axes": {"qr_plot": "Feld", "qr_spalte": "x", "qr_reihe": "y"},
+        "has_weight": False,
+    },
+}
+
+
+def available_projects() -> dict:
+    """Projects whose data folder is present. Falls back to a flat (root) layout."""
+    avail = {k: v for k, v in PROJECTS.items() if (APP_DIR / v["dir"]).exists()}
+    return avail or {"asendorf": {**PROJECTS["asendorf"], "dir": "."}}
+
 DISPLAY_NAMES = {
     "qr_spalte": "Column",
     "qr_reihe": "Row",
@@ -142,24 +170,40 @@ QR_PREFIX_RE = re.compile(
 
 
 def main() -> None:
-    st.title("Larvae QR Grid Explorer")
+    # ---- global project selector ----
+    projects = available_projects()
+    with st.sidebar:
+        st.header("Project")
+        proj_key = st.selectbox(
+            "Dataset", list(projects.keys()),
+            format_func=lambda k: projects[k]["label"], key="project_select",
+            help="Switch between the QR-linked (Asendorf) and text-labelled (Malchow) studies.",
+        )
+    proj = projects[proj_key]
+    data_dir = str(APP_DIR / proj["dir"])
+    st.session_state["_active_data_dir"] = data_dir
+    # relabel grid axes for the active project (Plot/Column/Row vs Feld/x/y)
+    for col, lab in proj.get("axes", {}).items():
+        DISPLAY_NAMES[col] = lab
+
+    st.title(proj.get("title", "Larvae Grid Explorer"))
     st.caption(
-        "Loads the QR-linked larval database, applies per-image QR calibration, and provides field, genotype, "
+        "Loads the selected larval database and provides field, genotype, "
         "morphometric, size-state, and quality-control views."
     )
 
     try:
-        summary_df, source_label = load_image_summary()
+        summary_df, source_label = load_image_summary(data_dir)
     except Exception as exc:
-        st.error(f"Could not load image_summary.parquet or image_summary.csv from repository root: {exc}")
+        st.error(f"Could not load image_summary from the project data folder: {exc}")
         st.stop()
 
     summary_df = repair_qr_metadata(summary_df)
-    parcel_df, parcel_source_label = load_parcel_metadata()
+    parcel_df, parcel_source_label = load_parcel_metadata(data_dir)
     summary_df = attach_parcel_metadata(summary_df, parcel_df)
     summary_df = add_scale_columns(summary_df, fallback_mm_per_px=DEFAULT_MM_PER_PX)
-    images_df, images_source_label = load_optional_table("images")
-    worms_df, worms_source_label = load_optional_table("worms")
+    images_df, images_source_label = load_optional_table(data_dir, "images")
+    worms_df, worms_source_label = load_optional_table(data_dir, "worms")
     summary_df, worms_df, gmm_info = attach_gmm_size_classes(
         summary_df,
         worms_df,
@@ -179,9 +223,9 @@ def main() -> None:
             st.caption(f"Parcel metadata: `{parcel_source_label}`; matched weights for {matched:,}/{len(summary_df):,} image rows")
         else:
             st.caption("Parcel metadata: not found (`parcel_metadata.csv` missing)")
-        if (APP_DIR / "manifest.json").exists():
+        if (Path(data_dir) / "manifest.json").exists():
             with st.expander("Manifest", expanded=False):
-                st.json(load_manifest())
+                st.json(load_manifest(data_dir))
         with st.expander("Loaded tables", expanded=False):
             st.write(f"image_summary: `{source_label}`")
             st.write(f"images: `{images_source_label or 'not found'}`")
@@ -425,9 +469,10 @@ def main() -> None:
 
 
 @st.cache_data(show_spinner=False)
-def load_image_summary() -> tuple[pd.DataFrame, str]:
-    parquet_path = APP_DIR / "image_summary.parquet"
-    csv_path = APP_DIR / "image_summary.csv"
+def load_image_summary(data_dir: str) -> tuple[pd.DataFrame, str]:
+    base = Path(data_dir)
+    parquet_path = base / "image_summary.parquet"
+    csv_path = base / "image_summary.csv"
     if parquet_path.exists():
         try:
             return pd.read_parquet(parquet_path), parquet_path.name
@@ -436,27 +481,28 @@ def load_image_summary() -> tuple[pd.DataFrame, str]:
                 raise
     if csv_path.exists():
         return pd.read_csv(csv_path), csv_path.name
-    raise FileNotFoundError("Expected image_summary.parquet or image_summary.csv next to streamlit_app.py")
+    raise FileNotFoundError("Expected image_summary.parquet or image_summary.csv in the project data folder")
 
 
 @st.cache_data(show_spinner=False)
-def load_manifest() -> dict:
+def load_manifest(data_dir: str) -> dict:
     try:
         import json
-        return json.loads((APP_DIR / "manifest.json").read_text(encoding="utf-8"))
+        return json.loads((Path(data_dir) / "manifest.json").read_text(encoding="utf-8"))
     except Exception as exc:
         return {"error": str(exc)}
 
 
 @st.cache_data(show_spinner=False)
-def load_optional_table(stem: str) -> tuple[pd.DataFrame | None, str | None]:
-    """Load an optional flat-table artifact from the app root.
+def load_optional_table(data_dir: str, stem: str) -> tuple[pd.DataFrame | None, str | None]:
+    """Load an optional flat-table artifact from the project data folder.
 
     Preference is parquet, then CSV. The app remains usable when auxiliary
     tables are absent, which is useful for lightweight Streamlit deployments.
     """
-    parquet_path = APP_DIR / f"{stem}.parquet"
-    csv_path = APP_DIR / f"{stem}.csv"
+    base = Path(data_dir)
+    parquet_path = base / f"{stem}.parquet"
+    csv_path = base / f"{stem}.csv"
     if parquet_path.exists():
         try:
             return pd.read_parquet(parquet_path), parquet_path.name
@@ -472,10 +518,11 @@ def load_optional_table(stem: str) -> tuple[pd.DataFrame | None, str | None]:
 
 
 @st.cache_data(show_spinner=False)
-def load_parcel_metadata() -> tuple[pd.DataFrame | None, str | None]:
-    """Load parcel-level plant-weight metadata from the app root."""
-    parquet_path = APP_DIR / "parcel_metadata.parquet"
-    csv_path = APP_DIR / "parcel_metadata.csv"
+def load_parcel_metadata(data_dir: str) -> tuple[pd.DataFrame | None, str | None]:
+    """Load parcel-level plant-weight metadata from the project data folder."""
+    base = Path(data_dir)
+    parquet_path = base / "parcel_metadata.parquet"
+    csv_path = base / "parcel_metadata.csv"
     if parquet_path.exists():
         try:
             return pd.read_parquet(parquet_path), parquet_path.name
@@ -490,17 +537,17 @@ def load_parcel_metadata() -> tuple[pd.DataFrame | None, str | None]:
     return None, None
 
 
-def load_genotype_names() -> dict:
+def load_genotype_names(data_dir: str) -> dict:
     """Optional R4S -> genotype name lookup.
 
-    Reads ``genotype_names.csv`` (or ``.parquet``) placed next to ``streamlit_app.py``.
+    Reads ``genotype_names.csv`` (or ``.parquet``) from the project data folder.
     Column names are flexible: the key may be one of
     {genotype_id, r4s, parcel_r4s, sample_id, qr_sample_id} and the name one of
     {genotype_name, name, sorte, genotype, variety}. Returns {{R4S int: name}}.
     If the file is absent the genotype tab simply falls back to R4S numbers.
     """
     for fname in ("genotype_names.csv", "genotype_names.parquet"):
-        path = APP_DIR / fname
+        path = Path(data_dir) / fname
         if not path.exists():
             continue
         try:
@@ -1734,7 +1781,7 @@ def build_genotype_traits(
     numeric_cols = [c for c in traits.columns if c != "project_code"]
     for col in numeric_cols:
         traits[col] = pd.to_numeric(traits[col], errors="coerce")
-    names = load_genotype_names()
+    names = load_genotype_names(st.session_state.get("_active_data_dir", str(APP_DIR)))
     if names:
         traits["genotype_name"] = traits["genotype_id"].map(names)
     return traits.sort_values("genotype_id").reset_index(drop=True)
@@ -2028,7 +2075,7 @@ def compute_larva_gmm_classes(
     model_selection = []
     # Model selection is performed on PC1-PC3 to avoid over-weighting correlated raw morphometrics.
     Xsel = scores[:, : min(3, scores.shape[1])]
-    for k in range(1, 7):
+    for k in range(1, 13):
         if len(Xsel) <= k:
             break
         _lab, _prob, m = diag_gmm_fit(Xsel, k=k, random_state=11 + k, n_init=3, max_iter=100)
@@ -2227,15 +2274,72 @@ def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: 
 
     ms = pd.DataFrame(gmm_info.get("model_selection", []))
     if not ms.empty:
+        st.markdown("#### How many size classes? (model selection)")
+        best_bic = gmm_info.get("best_bic_k_pc123")
         ms["delta_bic"] = ms["bic"] - ms["bic"].min()
-        fig_ms = go.Figure()
-        fig_ms.add_trace(go.Scatter(x=ms["k"], y=ms["delta_bic"], mode="lines+markers", name="ΔBIC"))
+        best_aic = None
         if "aic" in ms.columns:
             ms["delta_aic"] = ms["aic"] - ms["aic"].min()
+            best_aic = int(ms.loc[ms["aic"].idxmin(), "k"])
+        # Elbow/knee of the BIC curve: the k at maximum distance from the line
+        # joining the first and last points. More meaningful than the raw BIC
+        # minimum when the curve keeps drifting down (no sharply separated classes).
+        kk = ms["k"].to_numpy(float)
+        bb = ms["bic"].to_numpy(float)
+        if len(kk) >= 3:
+            p1 = np.array([kk[0], bb[0]])
+            line = np.array([kk[-1], bb[-1]]) - p1
+            ln = np.linalg.norm(line) or 1.0
+            dist = [abs(np.cross(line, np.array([kk[i], bb[i]]) - p1)) / ln for i in range(len(kk))]
+            elbow_k = int(kk[int(np.argmax(dist))])
+        else:
+            elbow_k = int(kk[int(np.argmin(bb))])
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("Suggested classes (BIC elbow)", elbow_k)
+        cc2.metric("BIC minimum at k", best_bic if best_bic is not None else "n/a")
+        cc3.metric("AIC minimum at k", best_aic if best_aic is not None else "n/a")
+        fig_ms = go.Figure()
+        fig_ms.add_trace(go.Scatter(x=ms["k"], y=ms["delta_bic"], mode="lines+markers", name="ΔBIC"))
+        if "delta_aic" in ms.columns:
             fig_ms.add_trace(go.Scatter(x=ms["k"], y=ms["delta_aic"], mode="lines+markers", name="ΔAIC"))
-        fig_ms.update_layout(title="GMM model selection in PC1–PC3 space", xaxis_title="Number of mixture components k", yaxis_title="Information criterion above best", height=360)
+        fig_ms.update_layout(title="GMM model selection in PC1–PC3 space (lower = better)", xaxis_title="Number of mixture components k", yaxis_title="Information criterion above best", height=360)
         st.plotly_chart(fig_ms, use_container_width=True)
+        st.caption(
+            "The number of size classes is chosen by information criteria over k=1..12 components fitted in PC1–PC3 space. "
+            "BIC penalises extra components more strongly than AIC, so its minimum is the suggested class count. "
+            "If the curve keeps dropping toward large k, the classes are not cleanly separated and the default two-class "
+            "(Size 1 / Size 2) split is an operational simplification rather than a sharp biological boundary."
+        )
         st.dataframe(ms, use_container_width=True)
+
+        # interactive: re-fit the larvae with a chosen number of classes
+        if not assignments.empty and {"gmm_pc1", "gmm_pc2"}.issubset(assignments.columns):
+            kmax = int(ms["k"].max())
+            default_k = int(elbow_k) if elbow_k else 2
+            k_choice = int(st.selectbox(
+                "Re-fit larvae with k classes", list(range(2, kmax + 1)),
+                index=max(0, min(kmax - 2, default_k - 2)), key="gmm_k_choice",
+                help="Re-clusters the individual larvae in PC1–PC3 space into k Gaussian components and shows the resulting class sizes."))
+            pcs = assignments[[c for c in ["gmm_pc1", "gmm_pc2", "gmm_pc3"] if c in assignments.columns]].apply(pd.to_numeric, errors="coerce")
+            kdf = assignments.loc[pcs.notna().all(axis=1)].copy()
+            Xk = pcs.loc[kdf.index].to_numpy(float)
+            if len(Xk) > k_choice:
+                klab, _kp, _km = diag_gmm_fit(Xk, k=k_choice, random_state=17, n_init=4, max_iter=150)
+                areas = pd.to_numeric(kdf.get("area_mm2"), errors="coerce").to_numpy(float)
+                order = pd.Series(areas).groupby(klab).mean().sort_values().index.tolist()
+                remap = {old: new for new, old in enumerate(order, start=1)}
+                kdf["k_class"] = [remap[v] for v in klab]
+                sizes = kdf.groupby("k_class").agg(n=("k_class", "size"), mean_area_mm2=("area_mm2", "mean")).reset_index()
+                sizes["fraction"] = (sizes["n"] / sizes["n"].sum()).round(3)
+                st.write(f"**k = {k_choice} classes** (ordered small → large by mean area):")
+                st.dataframe(sizes, use_container_width=True)
+                samp = kdf.sample(min(8000, len(kdf)), random_state=7)
+                figk = go.Figure(go.Scatter(
+                    x=samp["gmm_pc1"], y=samp["gmm_pc2"], mode="markers",
+                    marker=dict(size=4, color=samp["k_class"], colorscale="Turbo", opacity=0.5, colorbar=dict(title="class")),
+                    text=samp["k_class"], hovertemplate="class %{text}<br>PC1=%{x:.3g}<br>PC2=%{y:.3g}<extra></extra>"))
+                figk.update_layout(title=f"PCA coloured by {k_choice}-class GMM", xaxis_title="PC1", yaxis_title="PC2", height=520)
+                st.plotly_chart(figk, use_container_width=True)
 
     fd = pd.DataFrame(gmm_info.get("feature_differences", []))
     if not fd.empty:
