@@ -2317,8 +2317,13 @@ def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: 
         if len(kk) >= 3:
             p1 = np.array([kk[0], bb[0]])
             line = np.array([kk[-1], bb[-1]]) - p1
-            ln = np.linalg.norm(line) or 1.0
-            dist = [abs(np.cross(line, np.array([kk[i], bb[i]]) - p1)) / ln for i in range(len(kk))]
+            ln = float(np.linalg.norm(line)) or 1.0
+            # perpendicular distance to the endpoint line via an explicit 2-D cross
+            # product (NumPy 2.0 removed np.cross for 2-D vectors).
+            dist = []
+            for i in range(len(kk)):
+                v = np.array([kk[i], bb[i]]) - p1
+                dist.append(abs(line[0] * v[1] - line[1] * v[0]) / ln)
             elbow_k = int(kk[int(np.argmax(dist))])
         else:
             elbow_k = int(kk[int(np.argmin(bb))])
