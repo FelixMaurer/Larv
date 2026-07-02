@@ -1,12 +1,13 @@
 {
   "project": "malchow",
   "n_images": 79,
-  "n_worms": 16018,
+  "n_worms": 18874,
+  "n_worms_raw": 19354,
   "axes": {
     "qr_plot": "Feld",
     "qr_spalte": "x",
     "qr_reihe": "y",
     "qr_sample_id": "R4S"
   },
-  "note": "Text-labelled (OCR) Malchow larvae. Grid coordinates from label OCR with R4S repeat-consensus; sample id = R4S. Measurements are in pixels (no QR scale calibration), so size classes are operational, not mm."
+  "note": "Text-labelled (OCR) Malchow larvae, MAXIMUM-PRECISION set: worms are router-kept (portable v5, P>=0.4) AND not label-card leaks (18874 of 19354 raw). Grid coordinates from label OCR with R4S repeat-consensus; sample id = R4S. mm sizes are calibrated per-image from the tray-height fiducial anchored on the 2 QR frames (physical tray height 528.5 mm; s_QR 0.137 mm/px)."
 }
