@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -228,6 +229,7 @@ def main() -> None:
         summary_df,
         worms_df,
         fallback_mm_per_px=DEFAULT_MM_PER_PX,
+        data_dir=data_dir,
     )
     summary_df = add_weight_normalized_columns(summary_df)
 
@@ -1983,17 +1985,46 @@ GMM_LARVA_FEATURES = [
 ]
 
 
+GMM_PRECOMPUTED_COLS = {"gmm_size_class", "gmm_size1_probability", "gmm_size2_probability", "gmm_pc1"}
+
+
+def load_precomputed_gmm(worms: pd.DataFrame, data_dir: str | None,
+                         fallback_mm_per_px: float) -> tuple[pd.DataFrame, dict] | None:
+    """Use GMM classes baked into worms.parquet + gmm_info.json, if present.
+
+    Fitting the mixture over ~76k larvae (plus the k=1..12 model-selection sweep)
+    dominates cold-start time, so ``scripts/slim_and_precompute_gmm.py`` runs the
+    *same* functions offline and stores the result. Returns None when the data is
+    absent, so the app still fits on the fly for older data folders.
+    """
+    if not data_dir or not GMM_PRECOMPUTED_COLS.issubset(worms.columns):
+        return None
+    path = Path(data_dir) / "gmm_info.json"
+    if not path.exists():
+        return None
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not info.get("available"):
+        return None
+    # scale columns are cheap and are normally added inside the fit path
+    return add_scale_columns(worms, fallback_mm_per_px=fallback_mm_per_px), info
+
+
 def attach_gmm_size_classes(
     summary_df: pd.DataFrame,
     worms_df: pd.DataFrame | None,
     fallback_mm_per_px: float = DEFAULT_MM_PER_PX,
+    data_dir: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame | None, dict]:
-    """Fit a two-class multivariate larval GMM and merge image-level size-class counts.
+    """Attach a two-class multivariate larval GMM and merge image-level size-class counts.
 
-    The model is deliberately implemented in NumPy rather than scikit-learn so the
-    Streamlit app remains lightweight. Features are standardized to mean zero and
-    population standard deviation one. Labels are aligned so Size 1 is the lower
-    mean-area class and Size 2 is the higher mean-area class.
+    Uses precomputed classes when the project folder ships them; otherwise fits the
+    model here. The model is deliberately implemented in NumPy rather than
+    scikit-learn so the Streamlit app remains lightweight. Features are standardized
+    to mean zero and population standard deviation one. Labels are aligned so Size 1
+    is the lower mean-area class and Size 2 is the higher mean-area class.
     """
     info: dict[str, object] = {"available": False, "message": "worms table not available"}
     out_summary = summary_df.copy()
@@ -2002,7 +2033,11 @@ def attach_gmm_size_classes(
 
     worms = repair_qr_metadata(worms_df.copy())
     try:
-        worms, info = compute_larva_gmm_classes(worms, fallback_mm_per_px=fallback_mm_per_px)
+        pre = load_precomputed_gmm(worms, data_dir, fallback_mm_per_px)
+        if pre is not None:
+            worms, info = pre
+        else:
+            worms, info = compute_larva_gmm_classes(worms, fallback_mm_per_px=fallback_mm_per_px)
     except Exception as exc:
         info = {"available": False, "message": f"GMM analysis failed: {exc}"}
         return out_summary, worms_df, info
