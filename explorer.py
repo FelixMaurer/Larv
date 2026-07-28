@@ -682,11 +682,14 @@ def render_flex_stats(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None) -
                                 default=[c for c in ("count", "area_mm2", "axis_major_mm")
                                          if c in num][:2] or num[:1], key="lab_st_v")
             if vs:
-                out = df.groupby(g)[vs].agg(["count", "mean", "std", "median",
-                                             lambda s: s.quantile(.25),
-                                             lambda s: s.quantile(.75)])
-                out.columns = [f"{a}_{'q25' if '<lambda_0>' in b else 'q75' if '<lambda_1>' in b else b}"
-                               for a, b in out.columns]
+                # built one aggregate at a time: agg([...lambda...]) names the columns
+                # "<lambda_0>", which is a pandas internal and has changed between versions
+                gb = df.groupby(g)[vs]
+                parts = {"count": gb.count(), "mean": gb.mean(), "std": gb.std(),
+                         "median": gb.median(), "q25": gb.quantile(.25),
+                         "q75": gb.quantile(.75)}
+                out = pd.concat(parts, axis=1)
+                out.columns = [f"{val}_{stat}" for stat, val in out.columns]
                 out = out.reset_index().round(3)
                 st.dataframe(out, use_container_width=True, hide_index=True)
                 download_table(out, "group_summary", "lab_st_sum")
@@ -745,8 +748,14 @@ def render_flex_stats(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None) -
             xv = c1.selectbox("X", num, key="lab_st_rx")
             yv = c2.selectbox("Y", num, index=min(1, len(num) - 1), key="lab_st_ry")
             cg = st.selectbox("Colour by", ["(none)"] + grp, key="lab_st_rc")
-            dd = df[[xv, yv] + ([cg] if cg != "(none)" else [])].apply(
-                lambda s: pd.to_numeric(s, errors="ignore")).dropna(subset=[xv, yv])
+            # coerce only the two axes; the colour column stays as-is (it may be
+            # categorical). NB: pd.to_numeric(errors="ignore") was removed in pandas 3,
+            # so never use it -- Streamlit Cloud runs a newer pandas than the dev box.
+            cols = [xv, yv] + ([cg] if cg != "(none)" and cg in df.columns else [])
+            dd = df[cols].copy()
+            dd[xv] = pd.to_numeric(dd[xv], errors="coerce")
+            dd[yv] = pd.to_numeric(dd[yv], errors="coerce")
+            dd = dd.dropna(subset=[xv, yv])
             xs = pd.to_numeric(dd[xv], errors="coerce") if len(dd) else pd.Series(dtype=float)
             ys = pd.to_numeric(dd[yv], errors="coerce") if len(dd) else pd.Series(dtype=float)
             ok = xs.notna() & ys.notna() if len(dd) else pd.Series(dtype=bool)
