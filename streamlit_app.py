@@ -13,6 +13,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import explorer
+
 st.set_page_config(page_title="Larvae Explorer", layout="wide")
 
 # Auto-assign a unique key to every st.plotly_chart so that identical figures
@@ -372,9 +374,23 @@ def main() -> None:
             "They remain in the total image and larva counts, but are omitted from the grid plots."
         )
 
-    tab_map, tab_3d, tab_table, tab_rows, tab_genotype, tab_metadata, tab_trend, tab_cluster, tab_qc = st.tabs(
-        ["2D map", "3D bars", "Counter grid", "Rows", "Genotypes", "Metadata maps", "Trend analysis", "Clustering", "QC / missing"]
+    (tab_map, tab_3d, tab_table, tab_rows, tab_genotype, tab_metadata, tab_trend,
+     tab_cluster, tab_qc, tab_lab) = st.tabs(
+        ["2D map", "3D bars", "Counter grid", "Rows", "Genotypes", "Metadata maps",
+         "Trend analysis", "Clustering", "QC / missing", "🔬 Analysis lab"]
     )
+
+    with tab_lab:
+        # Interactive half of the app (plot studio, gating, GMM lab, statistics,
+        # sample labels, session save/restore). Kept in explorer.py so the validated
+        # analyses above are unaffected.
+        explorer.render_lab(
+            summary_df=explorer.apply_label_overrides(filtered_for_analysis),
+            worms_df=worms_df,
+            parcel_df=parcel_df,
+            gmm_info=gmm_info,
+            project=proj_key,
+        )
 
     with tab_map:
         st.plotly_chart(
