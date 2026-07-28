@@ -5,3 +5,5 @@ plotly
 pyarrow
 matplotlib
 reportlab
+scipy
+kaleido
