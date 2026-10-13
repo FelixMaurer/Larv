@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 DIST = WEB / "dist"
 STLITE = "1.9.2"            # @stlite/browser on jsdelivr (Streamlit 1.62, Pyodide / Python 3.13)
-REQUIREMENTS = ["plotly", "pyarrow", "scipy", "matplotlib"]
+REQUIREMENTS = ["plotly", "pyarrow", "scipy", "matplotlib", "reportlab"]   # reportlab: PDF report
 CODE = ["streamlit_app.py", "explorer.py"]
 # Parquet tables plus the small metadata files; the CSV copies of the parquet tables are not needed.
 DATA = {
@@ -50,7 +50,8 @@ import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@__STLITE__/b
 const v = "__VERSION__";
 const files = __FILES__;
 const withVersion = Object.fromEntries(Object.entries(files).map(([k, u]) => [k, { url: u + "?v=" + v }]));
-mount({ requirements: __REQUIREMENTS__, entrypoint: "streamlit_app.py", files: withVersion },
+mount({ requirements: __REQUIREMENTS__, entrypoint: "streamlit_app.py", files: withVersion,
+        streamlitConfig: { "client.toolbarMode": "viewer" } },
       document.getElementById("root"));
 </script>
 </body>

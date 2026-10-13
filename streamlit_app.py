@@ -49,17 +49,18 @@ MISSING_LABEL = "<missing>"
 # axes. If no data_* subfolder exists the app falls back to a flat layout.
 PROJECTS = {
     "asendorf": {
-        "label": "Asendorf — QR-linked (oilseed rape)",
+        "label": "Asendorf: QR-labelled trays",
         "dir": "data_asendorf",
-        "title": "Larvae QR Grid Explorer — Asendorf",
+        "title": "Larvae Explorer: Asendorf",
         "axes": {"qr_plot": "Plot", "qr_spalte": "Column", "qr_reihe": "Row"},
         "has_weight": True,
     },
     "malchow": {
-        "label": "Malchow — text-labelled (OCR)",
+        "label": "Malchow: text-labelled trays (OCR)",
         "dir": "data_malchow",
-        "title": "Larvae Text-label Explorer — Malchow",
+        "title": "Larvae Explorer: Malchow",
         "axes": {"qr_plot": "Feld", "qr_spalte": "x", "qr_reihe": "y"},
+        "grid_default": ("qr_spalte", "qr_reihe"),   # landscape: 30 x positions across, 10 y positions down
         "has_weight": False,
     },
 }
@@ -221,8 +222,8 @@ def main() -> None:
 
     st.title(proj.get("title", "Larvae Grid Explorer"))
     st.caption(
-        "Loads the selected larval database and provides field, genotype, "
-        "morphometric, size-state, and quality-control views."
+        "Field maps, genotype rankings, morphometrics, size states, instar classes and quality "
+        "control for the selected trial. Choose the trial and the metric in the sidebar."
     )
 
     try:
@@ -237,22 +238,19 @@ def main() -> None:
         st.stop()
 
     with st.sidebar:
-        st.header("Data")
-        st.caption(f"Loaded: `{source_label}`")
-        if parcel_source_label:
-            matched = int(summary_df.get("parcel_weight_match", pd.Series(False, index=summary_df.index)).fillna(False).sum())
-            st.caption(f"Parcel metadata: `{parcel_source_label}`; matched weights for {matched:,}/{len(summary_df):,} image rows")
-        else:
-            st.caption("Parcel metadata: not found (`parcel_metadata.csv` missing)")
-        if (Path(data_dir) / "manifest.json").exists():
-            with st.expander("Manifest", expanded=False):
-                st.json(load_manifest(data_dir))
-        with st.expander("Loaded tables", expanded=False):
-            st.write(f"image_summary: `{source_label}`")
-            st.write(f"images: `{images_source_label or 'not found'}`")
-            st.write(f"worms: `{worms_source_label or 'not found'}`")
-            st.write(f"parcel_metadata: `{parcel_source_label or 'not found'}`")
-            st.write(f"GMM size classes: `{'available' if gmm_info.get('available') else 'not available'}`")
+        with st.expander("Data sources", expanded=False):
+            if parcel_source_label:
+                matched = int(summary_df.get("parcel_weight_match", pd.Series(False, index=summary_df.index)).fillna(False).sum())
+                st.caption(f"Plant weights matched for {matched:,} of {len(summary_df):,} images.")
+            else:
+                st.caption("No parcel metadata (plant weights) for this trial.")
+            st.caption(
+                f"Tables: image summary `{source_label}`, images `{images_source_label or 'none'}`, "
+                f"larvae `{worms_source_label or 'none'}`, parcels `{parcel_source_label or 'none'}`; "
+                f"GMM size states {'available' if gmm_info.get('available') else 'not available'}."
+            )
+            if (Path(data_dir) / "manifest.json").exists():
+                st.json(load_manifest(data_dir), expanded=False)
 
         st.header("Filters")
         filtered = apply_filters(summary_df)
@@ -262,13 +260,15 @@ def main() -> None:
         x_col = st.selectbox(
             "X axis",
             grid_cols,
-            index=index_or_zero(grid_cols, GRID_X_DEFAULT),
+            index=index_or_zero(grid_cols, proj.get("grid_default", (GRID_X_DEFAULT, GRID_Y_DEFAULT))[0]),
+            key=f"grid_x_{proj_key}",
             format_func=display_name,
         )
         y_col = st.selectbox(
             "Y axis",
             grid_cols,
-            index=index_or_zero(grid_cols, GRID_Y_DEFAULT),
+            index=index_or_zero(grid_cols, proj.get("grid_default", (GRID_X_DEFAULT, GRID_Y_DEFAULT))[1]),
+            key=f"grid_y_{proj_key}",
             format_func=display_name,
         )
 
@@ -280,18 +280,12 @@ def main() -> None:
             format_func=lambda v: "Pixels" if v == "pixels" else "Metric dimensions",
             help="Pixel mode shows the raw working-pixel values. Metric mode converts length-like metrics to mm and area-like metrics to mm².",
         )
-        fallback_mm_per_px = st.number_input(
-            "Fallback scale (mm/px)",
-            min_value=0.0001,
-            max_value=100.0,
-            value=DEFAULT_MM_PER_PX,
-            step=0.01,
-            format="%.4f",
-            help="Used only when an image has no valid QR-derived working-pixel scale.",
-            disabled=True,
-        )
+        # fixed fallback, only for images without a per-image scale (was a disabled input)
+        fallback_mm_per_px = DEFAULT_MM_PER_PX
         n_qr_scale = int(filtered.get("scale_is_qr_derived", pd.Series(False, index=filtered.index)).fillna(False).sum())
-        st.caption(f"QR-derived scale: {n_qr_scale:,}/{len(filtered):,} images; fallback: {len(filtered) - n_qr_scale:,}.")
+        if n_qr_scale < len(filtered):
+            st.caption(f"Per-image scale for {n_qr_scale:,} of {len(filtered):,} images; the others use "
+                       f"{DEFAULT_MM_PER_PX:g} mm per working pixel.")
 
         st.header("Plant-weight normalization")
         weight_available = "plant_weight_kg" in filtered.columns and pd.to_numeric(filtered.get("plant_weight_kg"), errors="coerce").gt(0).any()
@@ -347,7 +341,16 @@ def main() -> None:
             step=0.05,
             help="Maximum bar height as a fraction of the grid footprint. Lower values make the 3D plot less vertically exaggerated.",
         )
-        show_value_table = st.checkbox("Show pivot table", value=True)
+
+        with st.expander("About", expanded=False):
+            st.caption(
+                "Counts are the corrected pipeline counts (Asendorf 30,596, Malchow 181,968 larvae); on 53 trays "
+                "counted blind by hand they were 5% below the manual total. Sizes use the per-image scale (QR code at Asendorf, "
+                "tray length at Malchow). Instar classes come from body length (major axis below 3.98 mm L1, "
+                "below 7.70 mm L2, otherwise L3), calibrated on 126 larvae with measured head capsules; L2 and L3 "
+                "overlap, so per-image instar counts are approximate. GMM size states are fitted per trial and "
+                "are not comparable between trials."
+            )
 
     filtered_for_analysis = analysis_df
     grid_assigned_mask = coordinates_available(filtered_for_analysis, x_col, y_col)
@@ -366,14 +369,14 @@ def main() -> None:
 
     missing_grid = int((~grid_assigned_mask).sum())
     if missing_grid:
-        st.info(
-            f"{missing_grid} image(s) are not assigned to a grid cell for the selected axes. "
-            "They remain in the total image and larva counts, but are omitted from the grid plots."
+        st.caption(
+            f"{missing_grid} image(s) have no grid position for the selected axes: they are included "
+            "in the totals above but not in the field maps."
         )
 
-    _view_main = explorer.view_selector(['2D map', '3D bars', 'Counter grid', 'Rows', 'Genotypes', 'Metadata maps', 'Trend analysis', 'Clustering', 'QC / missing', '🔬 Analysis lab'], key="view_main")
+    _view_main = explorer.view_selector(['2D map', '3D bars', 'Grid table', 'Data table', 'Genotypes', 'Metadata', 'Trends', 'GMM size states', 'QC', 'Analysis lab', 'Report'], key="view_main")
 
-    if _view_main == '🔬 Analysis lab':
+    if _view_main == 'Analysis lab':
         # Interactive half of the app (plot studio, gating, GMM lab, statistics,
         # sample labels, session save/restore). Kept in explorer.py so the validated
         # analyses above are unaffected.
@@ -405,7 +408,7 @@ def main() -> None:
             use_container_width=True,
         )
 
-    if _view_main == 'Counter grid':
+    if _view_main == 'Grid table':
         pivot = pivot_grid(grid)
         st.dataframe(pivot, use_container_width=True)
         st.download_button(
@@ -415,7 +418,7 @@ def main() -> None:
             mime="text/csv",
         )
 
-    if _view_main == 'Rows':
+    if _view_main == 'Data table':
         columns_to_show = unique_existing_columns(
             [y_col, x_col, metric, "count", "count_absolute", "count_per_kg_plant_weight", "plant_weight_kg", "plant_weight_g", "n_plants", "qr_plot", "qr_condition", "qr_sample_id", "scale_mm_per_px_used", "scale_source", "qr_extra_suffix", "qr_text", "original_filename", "output_basename"],
             filtered_for_analysis.columns,
@@ -437,7 +440,7 @@ def main() -> None:
             st.caption(
                 f"{len(per_larva_mm):,} individual larvae. Lengths in mm and areas in mm2, computed "
                 "per larva from the per-image QR-derived scale (raw pixel values and scale provenance kept "
-                "alongside). One row per larva — the complete measurement table for collaborators."
+                "alongside). One row per larva: the complete measurement table for collaborators."
             )
             st.download_button(
                 "Download per-larva measurements (QR-calibrated mm) as CSV",
@@ -453,7 +456,7 @@ def main() -> None:
             fallback_mm_per_px=fallback_mm_per_px,
         )
 
-    if _view_main == 'Metadata maps':
+    if _view_main == 'Metadata':
         render_metadata_maps(
             filtered_for_analysis,
             x_col=x_col,
@@ -464,18 +467,24 @@ def main() -> None:
             z_height_fraction=z_height_fraction,
         )
 
-    if _view_main == 'Trend analysis':
+    if _view_main == 'Trends':
         render_trend_analysis(filtered_for_analysis, metric_cols=metric_cols, default_metric=default_metric, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px)
 
-    if _view_main == 'Clustering':
+    if _view_main == 'GMM size states':
         render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px, worms_df=worms_df, gmm_info=gmm_info)
 
-    if _view_main == 'QC / missing':
+    if _view_main == 'QC':
         render_qc_analysis(summary_df, filtered, images_df, worms_df, parcel_df, x_col=x_col, y_col=y_col)
 
-    st.divider()
+    if _view_main == "Report":
+        render_report(filtered_for_analysis, gmm_info, x_col=x_col, y_col=y_col)
+
+
+def render_report(filtered_for_analysis: pd.DataFrame, gmm_info: dict, x_col: str, y_col: str) -> None:
+    """GMM infographic of the filtered data, built only when this view is open."""
     st.subheader("Download report")
-    st.caption("Create a compact GMM infographic from the currently filtered data, including absolute counts and plant-weight-normalized counts where available.")
+    st.caption("A compact GMM infographic of the currently filtered data, with absolute counts and "
+               "plant-weight-normalized counts where available.")
     try:
         report_pdf = build_gmm_infographic_pdf(filtered_for_analysis, gmm_info, x_col=x_col, y_col=y_col)
         st.download_button(
@@ -494,9 +503,6 @@ def main() -> None:
             mime="text/html",
         )
 
-    if show_value_table:
-        st.subheader("Current grid values")
-        st.dataframe(pivot_grid(grid), use_container_width=True)
 
 
 @st.cache_data(show_spinner="Preparing the project data ...")
@@ -792,25 +798,39 @@ def repair_qr_metadata(df: pd.DataFrame) -> pd.DataFrame:
         if col not in out.columns:
             out[col] = np.nan if col not in {"qr_condition", "qr_extra_suffix", "qr_parsed_relaxed"} else None
 
-    parsed_flags = []
-    for idx, row in out.iterrows():
-        parsed = parse_qr_row(row)
-        parsed_flags.append(parsed is not None)
-        if parsed is None:
-            continue
-        # Always allow relaxed parser to fill missing fields. Keep existing values when they are already present.
-        for col, key in [
-            ("qr_plot", "plot"),
-            ("qr_spalte", "spalte"),
-            ("qr_reihe", "reihe"),
-            ("qr_condition", "condition"),
-            ("qr_sample_id", "sample_id"),
-            ("qr_extra_suffix", "suffix"),
-        ]:
-            current = out.at[idx, col] if col in out.columns else np.nan
-            if pd.isna(current) or current == "":
-                out.at[idx, col] = parsed.get(key)
-        out.at[idx, "qr_parsed_relaxed"] = True
+    # Parse each distinct (qr_text, qr_raw) pair once and map the result back: the larva table repeats the
+    # text of its image on every row (30,596 and 181,968 rows, about 600 distinct texts), and the former
+    # row-by-row loop took about 10 s per call.
+    text_cols = [c for c in ("qr_text", "qr_raw") if c in out.columns]
+    if text_cols:
+        keys = [tuple(None if pd.isna(v) else v for v in row)
+                for row in out[text_cols].itertuples(index=False, name=None)]
+        cache: dict[tuple, dict | None] = {}
+        for k in set(keys):
+            cache[k] = parse_qr_row(pd.Series(dict(zip(text_cols, k)), dtype=object))
+        parsed_rows = [cache[k] for k in keys]
+    else:
+        parsed_rows = [None] * len(out)
+    ok = pd.Series([p is not None for p in parsed_rows], index=out.index)
+    # Always allow relaxed parser to fill missing fields. Keep existing values when they are already present.
+    for col, key in [
+        ("qr_plot", "plot"),
+        ("qr_spalte", "spalte"),
+        ("qr_reihe", "reihe"),
+        ("qr_condition", "condition"),
+        ("qr_sample_id", "sample_id"),
+        ("qr_extra_suffix", "suffix"),
+    ]:
+        current = out[col]
+        empty = current.isna() | current.astype(object).eq("")
+        fill = (empty & ok).to_numpy()
+        if fill.any():
+            values = pd.Series([p.get(key) if p is not None else None for p in parsed_rows], index=out.index, dtype=object)
+            out[col] = out[col].astype(object)
+            out.loc[fill, col] = values[fill]
+    if ok.any():
+        out["qr_parsed_relaxed"] = out["qr_parsed_relaxed"].astype(object)
+        out.loc[ok.to_numpy(), "qr_parsed_relaxed"] = True
 
     if "qr_parsed_relaxed" in out.columns:
         out["qr_parsed_relaxed"] = out["qr_parsed_relaxed"].fillna(False).astype(bool)
@@ -909,7 +929,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
                 selected = st.multiselect(label, options, default=options, format_func=lambda x: MISSING_LABEL if x == MISSING_LABEL else str(format_axis_label(x)))
                 filtered = filter_including_missing(filtered, col, selected)
             else:
-                st.caption(f"{label} filter hidden because there are {len(options)} distinct values.")
+                pass  # too many distinct values for a useful filter (e.g. 300 plots); no filter shown
     if "qr_sample_id" in filtered.columns:
         options = sorted_options_with_missing(filtered["qr_sample_id"])
         selected = st.multiselect(
@@ -1133,6 +1153,9 @@ def make_heatmap_figure(grid: pd.DataFrame, x_col: str, y_col: str, metric: str,
         return empty_figure("No data for current filters")
     x_pos, x_tickvals, x_ticktext, x_range = axis_positions_ticks_and_range(pivot.columns)
     y_pos, y_tickvals, y_ticktext, y_range = axis_positions_ticks_and_range(pivot.index)
+    # Square cells turn a 60 x 5 field into a thin strip; beyond 4:1 the cells are drawn rectangular.
+    span_ratio = (abs(x_range[1] - x_range[0]) + 1e-9) / (abs(y_range[1] - y_range[0]) + 1e-9)
+    elongated = span_ratio > 4 or span_ratio < 0.25
     fig = go.Figure(
         data=go.Heatmap(
             z=pivot.values,
@@ -1151,8 +1174,9 @@ def make_heatmap_figure(grid: pd.DataFrame, x_col: str, y_col: str, metric: str,
     fig.update_layout(
         title=f"{metric_label} by {display_name(x_col)} and {display_name(y_col)}",
         xaxis=dict(title=display_name(x_col), tickmode="array", tickvals=x_tickvals, ticktext=x_ticktext, range=x_range, constrain="domain"),
-        yaxis=dict(title=display_name(y_col), tickmode="array", tickvals=y_tickvals, ticktext=y_ticktext, range=[y_range[1], y_range[0]], scaleanchor="x", scaleratio=1, constrain="domain"),
-        height=square_grid_height(x_range, y_range),
+        yaxis=dict(title=display_name(y_col), tickmode="array", tickvals=y_tickvals, ticktext=y_ticktext, range=[y_range[1], y_range[0]],
+                   **({} if elongated else dict(scaleanchor="x", scaleratio=1)), constrain="domain"),
+        height=420 if elongated else square_grid_height(x_range, y_range),
         margin=dict(l=40, r=20, t=60, b=40),
     )
     return fig
@@ -1199,7 +1223,9 @@ def make_3d_bar_figure(grid: pd.DataFrame, x_col: str, y_col: str, metric: str, 
             x=grid["x_num"],
             y=grid["y_num"],
             z=np.maximum(heights, 0) + label_lift(heights),
-            mode="text",
+            # value labels only on small grids; on large ones (300 cells) they hide the bars, hover still shows them
+            mode="text" if len(raw_values) <= 80 else "markers",
+            marker=dict(size=3, opacity=0),
             text=[short_number(v) for v in raw_values],
             textposition="middle center",
             hovertemplate=(
@@ -1221,7 +1247,7 @@ def make_3d_bar_figure(grid: pd.DataFrame, x_col: str, y_col: str, metric: str, 
             xaxis=dict(title=display_name(x_col), tickmode="array", tickvals=x_tickvals, ticktext=x_ticktext, range=numeric_axis_range_with_padding(grid["x_num"])),
             yaxis=dict(title=display_name(y_col), tickmode="array", tickvals=y_tickvals, ticktext=y_ticktext, range=numeric_axis_range_with_padding(grid["y_num"])),
             zaxis=dict(title=f"{metric_label} display height", range=numeric_z_range_with_padding(heights)),
-            camera=dict(eye=dict(x=0.001, y=0.001, z=3.8), center=dict(x=0, y=0, z=0), up=dict(x=0, y=1, z=0), projection=dict(type="orthographic")),
+            camera=dict(eye=dict(x=-0.22, y=-0.85, z=0.62), center=dict(x=0, y=0, z=-0.12), up=dict(x=0, y=0, z=1), projection=dict(type="perspective")),
             aspectmode="manual",
             aspectratio=aspect,
         ),
@@ -1242,7 +1268,10 @@ def square_scene_aspect(x_values: pd.Series, y_values: pd.Series, heights: np.nd
     z_span = float(np.nanmax(np.abs(heights[np.isfinite(heights)]))) if np.isfinite(heights).any() else 1.0
     z_span = max(z_span, max(x_span, y_span) * 0.04)
     max_span = max(x_span, y_span, z_span, 1.0)
-    return {"x": float(x_span / max_span), "y": float(y_span / max_span), "z": float(z_span / max_span)}
+    # keep the short side of an elongated field (60 x 5) at least 30% of the long side, so it stays readable
+    x, y = x_span / max_span, y_span / max_span
+    x, y = max(x, 0.3 * max(x, y)), max(y, 0.3 * max(x, y))
+    return {"x": float(x), "y": float(y), "z": float(z_span / max_span)}
 
 
 def axis_span_with_padding(values: pd.Series) -> float:
@@ -2382,7 +2411,7 @@ def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: 
     c1.metric("GMM-analyzed larvae", f"{int(gmm_info.get('n_analyzed_larvae', 0)):,}")
     c2.metric("GMM Size 1", f"{int(gmm_info.get('size1_count', 0)):,}")
     c3.metric("GMM Size 2", f"{int(gmm_info.get('size2_count', 0)):,}")
-    c4.metric("Ambiguous P(Size 2)=0.4–0.6", f"{100*float(gmm_info.get('ambiguous_04_06_fraction', np.nan)):.2f}%")
+    c4.metric("Ambiguous P(Size 2) 0.4 to 0.6", f"{100*float(gmm_info.get('ambiguous_04_06_fraction', np.nan)):.2f}%")
     st.caption(
         f"Physical features use per-image QR scaling for {int(gmm_info.get('n_qr_scaled_larvae', 0)):,} analyzed detections; "
         f"the {DEFAULT_MM_PER_PX:.2f} mm/px fallback is used for {int(gmm_info.get('n_fallback_scaled_larvae', 0)):,}."
@@ -2475,10 +2504,10 @@ def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: 
         fig_ms.add_trace(go.Scatter(x=ms["k"], y=ms["delta_bic"], mode="lines+markers", name="ΔBIC"))
         if "delta_aic" in ms.columns:
             fig_ms.add_trace(go.Scatter(x=ms["k"], y=ms["delta_aic"], mode="lines+markers", name="ΔAIC"))
-        fig_ms.update_layout(title="GMM model selection in PC1–PC3 space (lower = better)", xaxis_title="Number of mixture components k", yaxis_title="Information criterion above best", height=360)
+        fig_ms.update_layout(title="GMM model selection in PC1 to PC3 space (lower = better)", xaxis_title="Number of mixture components k", yaxis_title="Information criterion above best", height=360)
         st.plotly_chart(fig_ms, use_container_width=True)
         st.caption(
-            "The number of size classes is chosen by information criteria over k=1..12 components fitted in PC1–PC3 space. "
+            "The number of size classes is chosen by information criteria over k=1..12 components fitted in PC1 to PC3 space. "
             "BIC penalises extra components more strongly than AIC, so its minimum is the suggested class count. "
             "If the curve keeps dropping toward large k, the classes are not cleanly separated and the default two-class "
             "(Size 1 / Size 2) split is an operational simplification rather than a sharp biological boundary."
@@ -2492,7 +2521,7 @@ def render_clustering_analysis(df: pd.DataFrame, metric_cols: list[str], x_col: 
             k_choice = int(st.selectbox(
                 "Re-fit larvae with k classes", list(range(2, kmax + 1)),
                 index=max(0, min(kmax - 2, default_k - 2)), key="gmm_k_choice",
-                help="Re-clusters the individual larvae in PC1–PC3 space into k Gaussian components and shows the resulting class sizes."))
+                help="Re-clusters the individual larvae in PC1 to PC3 space into k Gaussian components and shows the resulting class sizes."))
             pcs = assignments[[c for c in ["gmm_pc1", "gmm_pc2", "gmm_pc3"] if c in assignments.columns]].apply(pd.to_numeric, errors="coerce")
             kdf = assignments.loc[pcs.notna().all(axis=1)].copy()
             Xk = pcs.loc[kdf.index].to_numpy(float)
