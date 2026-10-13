@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import time
 from typing import Any
 
@@ -233,18 +234,37 @@ def render_label_editor(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None,
                 m |= tbl[c].astype(str).str.contains(q, case=False, na=False)
         view = tbl[m]
 
-    edited = st.data_editor(
-        view, key="lab_label_editor", use_container_width=True, hide_index=True,
-        column_config={
-            "qr_sample_id": st.column_config.NumberColumn("R4S", disabled=True, format="%d"),
-            "genotype": st.column_config.TextColumn("Genotype (original)", disabled=True),
-            "images": st.column_config.NumberColumn("Images", disabled=True),
-            "larvae": st.column_config.NumberColumn("Larvae", disabled=True),
-            "plot": st.column_config.NumberColumn("Plot", disabled=True, format="%d"),
-            "label": st.column_config.TextColumn("Label (editable)"),
-            "note": st.column_config.TextColumn("Note (editable)"),
-            "exclude": st.column_config.CheckboxColumn("Exclude"),
-        })
+    try:
+        edited = st.data_editor(
+            view, key="lab_label_editor", use_container_width=True, hide_index=True,
+            column_config={
+                "qr_sample_id": st.column_config.NumberColumn("R4S", disabled=True, format="%d"),
+                "genotype": st.column_config.TextColumn("Genotype (original)", disabled=True),
+                "images": st.column_config.NumberColumn("Images", disabled=True),
+                "larvae": st.column_config.NumberColumn("Larvae", disabled=True),
+                "plot": st.column_config.NumberColumn("Plot", disabled=True, format="%d"),
+                "label": st.column_config.TextColumn("Label (editable)"),
+                "note": st.column_config.TextColumn("Note (editable)"),
+                "exclude": st.column_config.CheckboxColumn("Exclude"),
+            })
+    except Exception:
+        # The browser build (stlite, sys.platform "emscripten") fails inside st.data_editor
+        # (NameError 'arrow_table' in stlite 1.9.2). There, show the table read-only and edit
+        # one sample at a time; on a normal Streamlit server the error is raised as before.
+        if sys.platform != "emscripten" or view.empty:
+            raise
+        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.caption("In the browser version, edit one sample at a time, then press Apply edits.")
+        e1, e2, e3, e4 = st.columns([1, 2, 2, 1])
+        sid = e1.selectbox("Sample (R4S)", view["qr_sample_id"].tolist(), format_func=lambda v: f"{v:.0f}",
+                           key="lab_lbl_one_sid")
+        row = view[view["qr_sample_id"] == sid].iloc[0]
+        lbl = e2.text_input("Label", row["label"], key=f"lab_lbl_one_label_{sid}")
+        note = e3.text_input("Note", row["note"], key=f"lab_lbl_one_note_{sid}")
+        exc = e4.checkbox("Exclude", bool(row["exclude"]), key=f"lab_lbl_one_excl_{sid}")
+        edited = view.copy()
+        m = edited["qr_sample_id"] == sid
+        edited.loc[m, "label"], edited.loc[m, "note"], edited.loc[m, "exclude"] = lbl, note, exc
 
     c1, c2, c3 = st.columns(3)
     if c1.button("Apply edits", key="lab_lbl_apply", type="primary"):

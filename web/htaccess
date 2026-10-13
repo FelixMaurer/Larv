@@ -1,0 +1,35 @@
+# Larvae Explorer (static stlite build): only under felixmilanmaurer.com, only over https, behind a password.
+# Not linked from any page (noindex). Same pattern as /html/larvacount/.htaccess and /html/trainland/.htaccess.
+Options -Indexes
+
+# Other domains share this web folder: refuse them outright.
+<If "%{HTTP_HOST} !~ /^(www\.)?felixmilanmaurer\.com$/i">
+    Require all denied
+</If>
+# Plain http: refuse instead of asking for the password unencrypted, and forward to https.
+# (In .htaccess Apache asks for the login before any redirect could run.)
+<ElseIf "%{HTTPS} != 'on'">
+    Require all denied
+    ErrorDocument 403 https://felixmilanmaurer.com/larvae/
+</ElseIf>
+
+# Password: bcrypt hash in /.htpasswd-larvae (webspace root, outside the public folder).
+AuthType Basic
+AuthName "Larvae Explorer"
+AuthUserFile /var/www/vhosts/h253657.web52.alfahosting-server.de/.htpasswd-larvae
+Require valid-user
+
+<IfModule mod_mime.c>
+    AddType text/x-python .py
+    AddType application/vnd.apache.parquet .parquet
+</IfModule>
+<IfModule mod_headers.c>
+    Header set X-Robots-Tag "noindex, nofollow"
+    # files are versioned by ?v= in index.html, so they may be cached; the page itself is revalidated
+    <FilesMatch "\.(py|parquet|csv|json|svg)$">
+        Header set Cache-Control "private, max-age=604800"
+    </FilesMatch>
+    <FilesMatch "^index\.html$">
+        Header set Cache-Control "no-cache"
+    </FilesMatch>
+</IfModule>

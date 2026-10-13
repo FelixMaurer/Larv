@@ -3,3 +3,5 @@ __pycache__/
 _backup_*/
 .DS_Store
 .streamlit/secrets.toml
+web/dist/
+web/local/
