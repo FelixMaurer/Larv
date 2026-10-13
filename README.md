@@ -116,3 +116,24 @@ additionally corrected for misclassification (Asendorf 78% L3, Malchow 39% L3). 
 
 Also: the tracked `__pycache__/*.pyc` files were removed from the repository (they were already in
 `.gitignore`).
+
+---
+## Web version without a server (2026-10-13)
+
+The same app also runs **entirely in the browser** with [stlite](https://github.com/whitphx/stlite) (Streamlit on
+Pyodide/WebAssembly), so it can be served as static files from any web host, independent of Streamlit Cloud.
+
+- Live (password protected, not linked anywhere): https://felixmilanmaurer.com/larvae/
+- Build: `python web/build_web.py` -> `web/dist/` (index.html, the two .py files, the parquet tables and small
+  metadata files, icon, `.htaccess`). stlite version and Python packages are set at the top of the script.
+- Upload `web/dist/` to `/html/larvae/` on the Alfahosting webspace over FTPS (see
+  `C:\projects\alfahosting-handoff\KNOWLEDGE.md`). Basic Auth: `web/htaccess` -> `.htaccess`, hash in
+  `/.htpasswd-larvae` (webspace root). A new login: `php web/make_login.php <user> web/local/.htpasswd-larvae
+  web/local/LOGIN.txt` (`web/local/` is git-ignored; never commit it).
+- First visit downloads about 60 MB (Pyodide, Streamlit, pandas, plotly, scipy, matplotlib from jsdelivr, plus
+  26 MB of data) and needs about a minute; the browser caches it afterwards. Every widget change reruns the whole
+  script in WebAssembly, which takes up to about half a minute.
+- Browser-only difference: `st.data_editor` fails in stlite 1.9.2 (NameError `arrow_table`), so the label editor in
+  the Analysis lab shows the table read-only with a one-sample-at-a-time form (`explorer.render_label_editor`).
+  The console shows harmless "Download Button fetch error" messages from Streamlit's prefetch; clicking a download
+  button works.

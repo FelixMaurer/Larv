@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- LarvaCount: a flea-beetle larva on a backlit tray, with a count mark -->
+  <rect x="2" y="2" width="60" height="60" rx="13" fill="#f3e6c8" stroke="#8a6d3b" stroke-width="3"/>
+  <!-- larva body: thick curved stroke with segment rings -->
+  <path d="M15 44 C 14 26, 30 14, 47 19" fill="none" stroke="#6b4a24" stroke-width="12" stroke-linecap="round"/>
+  <path d="M15 44 C 14 26, 30 14, 47 19" fill="none" stroke="#9c7440" stroke-width="7" stroke-linecap="round"
+        stroke-dasharray="1.6 4.4"/>
+  <!-- dark head capsule -->
+  <circle cx="47.5" cy="19" r="5.6" fill="#2b1a0c"/>
+  <!-- count mark (as in the app) -->
+  <circle cx="45" cy="45" r="9" fill="#ffffff" stroke="#0b8a3e" stroke-width="3.5"/>
+  <circle cx="45" cy="45" r="3.2" fill="#0b8a3e"/>
+</svg>
