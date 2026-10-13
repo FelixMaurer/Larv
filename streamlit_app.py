@@ -348,8 +348,8 @@ def main() -> None:
                 "counted blind by hand they were 5% below the manual total. Sizes use the per-image scale (QR code at Asendorf, "
                 "tray length at Malchow). Instar classes come from body length (major axis below 3.98 mm L1, "
                 "below 7.70 mm L2, otherwise L3), calibrated on 126 larvae with measured head capsules; L2 and L3 "
-                "overlap, so per-image instar counts are approximate. GMM size states are fitted per trial and "
-                "are not comparable between trials."
+                "overlap, so per-image instar counts are approximate. GMM size states are the manuscript's fit "
+                "(26,398 Asendorf and 155,094 Malchow larvae), made per trial, so they are not comparable between trials."
             )
 
     filtered_for_analysis = analysis_df
