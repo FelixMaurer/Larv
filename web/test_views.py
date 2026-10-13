@@ -15,13 +15,12 @@ from streamlit.testing.v1 import AppTest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))   # the app imports explorer.py from its own folder
 APP = str(ROOT / "streamlit_app.py")
-MAIN = ["2D map", "3D bars", "Counter grid", "Rows", "Genotypes", "Metadata maps", "Trend analysis",
-        "Clustering", "QC / missing", "🔬 Analysis lab"]
-SUB = {"Metadata maps": ("view_metadata", ["2D metadata map", "3D metadata bars", "Metadata grid table",
+MAIN = ['2D map', '3D bars', 'Grid table', 'Data table', 'Genotypes', 'Metadata', 'Trends', 'GMM size states', 'QC', 'Analysis lab', 'Report']
+SUB = {"Metadata": ("view_metadata", ["2D metadata map", "3D metadata bars", "Metadata grid table",
                                           "Metadata trends"]),
-       "QC / missing": ("view_qc", ["Unreadable QR", "Missing QR fields", "Missing parcels", "Duplicate parcels",
+       "QC": ("view_qc", ["Unreadable QR", "Missing QR fields", "Missing parcels", "Duplicate parcels",
                                     "Plant weights", "Table inventory"]),
-       "🔬 Analysis lab": ("view_lab", ["Plot studio", "Gating", "GMM lab", "Statistics", "Sample labels",
+       "Analysis lab": ("view_lab", ["Plot studio", "Gating", "GMM lab", "Statistics", "Sample labels",
                                         "Session file"])}
 
 

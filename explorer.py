@@ -93,9 +93,12 @@ def figure_exports(fig: go.Figure, basename: str, key: str) -> None:
         svg = fig.to_image(format="svg")
         c1.download_button("Download SVG", svg, file_name=f"{basename}.svg",
                            mime="image/svg+xml", key=f"{key}_svg")
-    except Exception as exc:                                   # kaleido missing/broken
-        c1.caption(f"SVG export unavailable ({type(exc).__name__}); "
-                   "use the camera icon on the chart.")
+    except Exception as exc:                                   # kaleido missing/broken, or browser build
+        if sys.platform == "emscripten":
+            c1.caption("Vector figure: use the camera icon above the chart, which saves an SVG file.")
+        else:
+            c1.caption(f"SVG export unavailable ({type(exc).__name__}); "
+                       "use the camera icon above the chart, which saves an SVG file.")
     try:
         png = fig.to_image(format="png", scale=2)
         c2.download_button("Download PNG", png, file_name=f"{basename}.png",
