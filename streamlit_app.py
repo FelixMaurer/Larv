@@ -1214,7 +1214,10 @@ def make_3d_bar_figure(grid: pd.DataFrame, x_col: str, y_col: str, metric: str, 
             colorscale=colorscale_for_metric(metric),
             colorbar=dict(title=metric_label),
             flatshading=True,
-            opacity=0.95,
+            # fully opaque: with opacity < 1 Plotly's WebGL draws far faces over near ones ("inside out")
+            opacity=1.0,
+            lighting=dict(ambient=0.55, diffuse=0.75, specular=0.15, roughness=0.6, fresnel=0.1),
+            lightposition=dict(x=-1000, y=-2000, z=3000),
             hoverinfo="skip",
         )
     )
@@ -1351,7 +1354,8 @@ def axis_range(values: pd.Series) -> float:
 def cuboid_mesh(xs: np.ndarray, ys: np.ndarray, heights: np.ndarray, raw_values: np.ndarray, x_width: float, y_width: float) -> tuple[list[float], list[float], list[float], list[int], list[int], list[int], list[float]]:
     vertices_x, vertices_y, vertices_z, intensity = [], [], [], []
     ii, jj, kk = [], [], []
-    faces = [(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4), (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+    # outward-facing triangles (bottom face wound downwards, the others outwards) so lighting is not inverted
+    faces = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4), (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
     for x0, y0, h, raw in zip(xs, ys, heights, raw_values):
         if not np.isfinite(x0) or not np.isfinite(y0) or not np.isfinite(h):
             continue
