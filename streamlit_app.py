@@ -115,6 +115,16 @@ DISPLAY_NAMES = {
     "gmm_size1_count_per_kg_plant_weight": "GMM Size 1 larvae/kg plant weight",
     "gmm_size2_count_per_kg_plant_weight": "GMM Size 2 larvae/kg plant weight",
     "gmm_total_count_per_kg_plant_weight": "GMM-classified larvae/kg plant weight",
+    "instar_total_count": "Instar-classified larva count",
+    "instar_l1_count": "Instar L1 count (body size)",
+    "instar_l2_count": "Instar L2 count (body size)",
+    "instar_l3_count": "Instar L3 count (body size)",
+    "instar_l3_fraction": "Instar L3 fraction (body size)",
+    "instar_l1_l2_fraction": "Instar L1 + L2 fraction (body size)",
+    "instar_l1_count_per_kg_plant_weight": "Instar L1 larvae/kg plant weight",
+    "instar_l2_count_per_kg_plant_weight": "Instar L2 larvae/kg plant weight",
+    "instar_l3_count_per_kg_plant_weight": "Instar L3 larvae/kg plant weight",
+    "instar_total_count_per_kg_plant_weight": "Instar-classified larvae/kg plant weight",
     "plant_weight_g": "Plant weight (g)",
     "plant_weight_kg": "Plant weight (kg)",
     "n_plants": "Number of plants",
@@ -233,6 +243,7 @@ def main() -> None:
         fallback_mm_per_px=DEFAULT_MM_PER_PX,
         data_dir=data_dir,
     )
+    summary_df, worms_df = attach_instar_classes(summary_df, worms_df)
     summary_df = add_weight_normalized_columns(summary_df)
 
     if summary_df.empty:
@@ -676,7 +687,8 @@ def add_weight_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["plant_weight_kg"] = np.nan
     weight_kg = pd.to_numeric(out["plant_weight_kg"], errors="coerce")
     valid_weight = weight_kg.gt(0)
-    for count_col in ["count", "count_from_worm_rows", "gmm_total_count", "gmm_size1_count", "gmm_size2_count"]:
+    for count_col in ["count", "count_from_worm_rows", "gmm_total_count", "gmm_size1_count", "gmm_size2_count",
+                      "instar_total_count", "instar_l1_count", "instar_l2_count", "instar_l3_count"]:
         if count_col in out.columns:
             counts = pd.to_numeric(out[count_col], errors="coerce")
             out[f"{count_col}_absolute"] = counts
@@ -696,7 +708,8 @@ def apply_count_weight_normalization(df: pd.DataFrame, enabled: bool) -> pd.Data
         return out
     weight_kg = pd.to_numeric(out["plant_weight_kg"], errors="coerce")
     valid_weight = weight_kg.gt(0)
-    for col in ["count", "count_from_worm_rows", "gmm_total_count", "gmm_size1_count", "gmm_size2_count"]:
+    for col in ["count", "count_from_worm_rows", "gmm_total_count", "gmm_size1_count", "gmm_size2_count",
+                      "instar_total_count", "instar_l1_count", "instar_l2_count", "instar_l3_count"]:
         if col in out.columns:
             counts = pd.to_numeric(out[col], errors="coerce")
             if f"{col}_absolute" not in out.columns:
@@ -712,12 +725,18 @@ def set_count_display_names(normalize_counts_by_weight: bool) -> None:
         DISPLAY_NAMES["gmm_total_count"] = "GMM-classified larvae/kg plant weight"
         DISPLAY_NAMES["gmm_size1_count"] = "GMM Size 1 larvae/kg plant weight"
         DISPLAY_NAMES["gmm_size2_count"] = "GMM Size 2 larvae/kg plant weight"
+        DISPLAY_NAMES["instar_total_count"] = "Instar-classified larvae/kg plant weight"
+        for k in (1, 2, 3):
+            DISPLAY_NAMES[f"instar_l{k}_count"] = f"Instar L{k} larvae/kg plant weight"
     else:
         DISPLAY_NAMES["count"] = "Larva count"
         DISPLAY_NAMES["count_from_worm_rows"] = "Larva rows in table"
         DISPLAY_NAMES["gmm_total_count"] = "GMM-classified larva count"
         DISPLAY_NAMES["gmm_size1_count"] = "GMM Size 1 count"
         DISPLAY_NAMES["gmm_size2_count"] = "GMM Size 2 count"
+        DISPLAY_NAMES["instar_total_count"] = "Instar-classified larva count"
+        for k in (1, 2, 3):
+            DISPLAY_NAMES[f"instar_l{k}_count"] = f"Instar L{k} count (body size)"
 
 
 def build_per_larva_mm_table(worms_df, fallback_mm_per_px: float = DEFAULT_MM_PER_PX) -> pd.DataFrame:
@@ -940,6 +959,14 @@ def metric_columns(df: pd.DataFrame, exclude: set[str]) -> list[str]:
         "gmm_total_count_per_kg_plant_weight",
         "gmm_size2_fraction",
         "gmm_mean_size2_probability",
+        "instar_l1_count",
+        "instar_l2_count",
+        "instar_l3_count",
+        "instar_l3_fraction",
+        "instar_l1_l2_fraction",
+        "instar_l1_count_per_kg_plant_weight",
+        "instar_l2_count_per_kg_plant_weight",
+        "instar_l3_count_per_kg_plant_weight",
         "plant_weight_kg",
         "plant_weight_g",
         "n_plants",
@@ -2081,6 +2108,59 @@ def attach_gmm_size_classes(
         if col in out_summary.columns:
             out_summary[col] = pd.to_numeric(out_summary[col], errors="coerce").fillna(0)
     return out_summary, worms, info
+
+
+# Body-size instar classes, from the manuscript (instar_size_classes.py, 13 Oct 2026): two thresholds
+# on the major axis calibrated against stereo-microscope head-capsule width on 126 larvae (L1 below
+# 0.33 mm, L2 0.33 to 0.45 mm, L3 from 0.46 mm), leave-one-out balanced accuracy 0.83 (recall L1 0.95,
+# L2 0.86, L3 0.68). Per-image counts are the assigned classes; L2 and L3 overlap in body size, so
+# site-level fractions in the paper are additionally corrected for misclassification.
+INSTAR_THRESHOLDS_MM = (3.980, 7.698)
+
+
+def size_reliable_mask(worms: pd.DataFrame) -> pd.Series:
+    """Larvae whose size can be measured: not two larvae merged head to tail (skeleton length at least
+    1.7 times the median with solidity below 0.82) and not a thin rim artefact (solidity below 0.55 or
+    aspect ratio above 14). Same rule as the manuscript; a shipped ``size_reliable`` column is used as is."""
+    if "size_reliable" in worms.columns:
+        return worms["size_reliable"].fillna(False).astype(bool)
+    length = pd.to_numeric(worms.get("skeleton_length_mm"), errors="coerce")
+    solidity = pd.to_numeric(worms.get("solidity"), errors="coerce")
+    aspect = pd.to_numeric(worms.get("aspect_ratio"), errors="coerce")
+    merged = length.ge(1.7 * length.median()) & solidity.lt(0.82)
+    rim = solidity.lt(0.55) | aspect.gt(14)
+    return ~(merged | rim)
+
+
+def attach_instar_classes(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None
+                          ) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Assign L1/L2/L3 per larva from the major axis and merge per-image instar counts."""
+    if worms_df is None or worms_df.empty or "axis_major_mm" not in worms_df.columns \
+            or "output_basename" not in worms_df.columns:
+        return summary_df, worms_df
+    worms = worms_df.copy()
+    ok = size_reliable_mask(worms)
+    if "is_valid_larva" in worms.columns:
+        ok &= worms["is_valid_larva"].fillna(False).astype(bool)
+    x = pd.to_numeric(worms["axis_major_mm"], errors="coerce")
+    t1, t2 = INSTAR_THRESHOLDS_MM
+    instar = pd.Series(np.where(x < t1, "L1", np.where(x < t2, "L2", "L3")), index=worms.index)
+    worms["instar_class"] = instar.where(ok & x.notna())
+    g = worms.dropna(subset=["output_basename", "instar_class"])
+    counts = (g.groupby(["output_basename", "instar_class"]).size().unstack(fill_value=0)
+              .reindex(columns=["L1", "L2", "L3"], fill_value=0))
+    counts.columns = ["instar_l1_count", "instar_l2_count", "instar_l3_count"]
+    counts["instar_total_count"] = counts.sum(axis=1)
+    total = counts["instar_total_count"].replace(0, np.nan)
+    counts["instar_l3_fraction"] = counts["instar_l3_count"] / total
+    counts["instar_l1_l2_fraction"] = (counts["instar_l1_count"] + counts["instar_l2_count"]) / total
+    out = summary_df.copy()
+    if "output_basename" not in out.columns:
+        return out, worms
+    out = out.merge(counts.reset_index(), on="output_basename", how="left")
+    for col in ["instar_l1_count", "instar_l2_count", "instar_l3_count", "instar_total_count"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    return out, worms
 
 
 @st.cache_data(show_spinner=False)
