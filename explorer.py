@@ -50,6 +50,20 @@ def lab_state() -> dict:
     return s
 
 
+def view_selector(labels: list[str], key: str) -> str:
+    """Tab-like selector that replaces st.tabs: only the code of the chosen view runs.
+
+    st.tabs renders (and computes) every tab on every rerun. In the browser build (stlite, Python in
+    WebAssembly) that made each click take up to half a minute. Widgets inside views that are not shown
+    lose their state when another view is selected, as with any widget that is not rendered.
+    """
+    if st.session_state.get(key) not in labels:
+        st.session_state[key] = labels[0]
+    choice = st.segmented_control(key.replace("_", " "), labels, key=key, selection_mode="single",
+                                  label_visibility="collapsed")
+    return choice if choice in labels else labels[0]
+
+
 def numeric_columns(df: pd.DataFrame) -> list[str]:
     return sorted(c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]))
 
@@ -690,10 +704,10 @@ def render_flex_stats(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None) -
         st.info("No data.")
         return
 
-    t_sum, t_cmp, t_reg = st.tabs(["Group summary", "Compare groups", "Correlation & regression"])
+    _view_lab_stats = view_selector(['Group summary', 'Compare groups', 'Correlation & regression'], key="view_lab_stats")
     num, grp = numeric_columns(df), grouping_columns(df)
 
-    with t_sum:
+    if _view_lab_stats == 'Group summary':
         if not grp or not num:
             st.info("Need a grouping column and a numeric column.")
         else:
@@ -714,7 +728,7 @@ def render_flex_stats(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None) -
                 st.dataframe(out, use_container_width=True, hide_index=True)
                 download_table(out, "group_summary", "lab_st_sum")
 
-    with t_cmp:
+    if _view_lab_stats == 'Compare groups':
         if not grp or not num:
             st.info("Need a grouping column and a numeric column.")
         else:
@@ -759,7 +773,7 @@ def render_flex_stats(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None) -
                     show_figure(fig, "group_comparison", "lab_st_fig")
                     download_table(desc, "group_comparison", "lab_st_cmp")
 
-    with t_reg:
+    if _view_lab_stats == 'Correlation & regression':
         if len(num) < 2:
             st.info("Need two numeric columns.")
         else:
@@ -859,17 +873,16 @@ def render_session_io(project: str) -> None:
 def render_lab(summary_df: pd.DataFrame, worms_df: pd.DataFrame | None,
                parcel_df: pd.DataFrame | None, gmm_info: dict | None, project: str) -> None:
     """Render the whole lab as one tab group."""
-    t_plot, t_gate, t_gmm, t_stats, t_lbl, t_sess = st.tabs(
-        ["Plot studio", "Gating", "GMM lab", "Statistics", "Sample labels", "Session file"])
-    with t_plot:
+    _view_lab = view_selector(['Plot studio', 'Gating', 'GMM lab', 'Statistics', 'Sample labels', 'Session file'], key="view_lab")
+    if _view_lab == 'Plot studio':
         render_plot_studio(summary_df, worms_df)
-    with t_gate:
+    if _view_lab == 'Gating':
         render_gating(worms_df)
-    with t_gmm:
+    if _view_lab == 'GMM lab':
         render_gmm_lab(worms_df, gmm_info)
-    with t_stats:
+    if _view_lab == 'Statistics':
         render_flex_stats(summary_df, worms_df)
-    with t_lbl:
+    if _view_lab == 'Sample labels':
         render_label_editor(summary_df, worms_df, parcel_df)
-    with t_sess:
+    if _view_lab == 'Session file':
         render_session_io(project)

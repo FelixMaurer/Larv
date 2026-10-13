@@ -131,8 +131,11 @@ Pyodide/WebAssembly), so it can be served as static files from any web host, ind
   `/.htpasswd-larvae` (webspace root). A new login: `php web/make_login.php <user> web/local/.htpasswd-larvae
   web/local/LOGIN.txt` (`web/local/` is git-ignored; never commit it).
 - First visit downloads about 60 MB (Pyodide, Streamlit, pandas, plotly, scipy, matplotlib from jsdelivr, plus
-  26 MB of data) and needs about a minute; the browser caches it afterwards. Every widget change reruns the whole
-  script in WebAssembly, which takes up to about half a minute.
+  26 MB of data) and needs about a minute; the browser caches it afterwards. Since 2026-10-13 a click takes about one second:
+  the views are chosen with a tab-like selector (`explorer.view_selector`) so only the open view is computed
+  (st.tabs computes all of them), and the per-project data preparation is cached (`prepare_project_data`).
+  Widgets inside a view that is not open lose their settings when you switch views. `python web/test_views.py`
+  runs every view of both projects headless and reports exceptions.
 - Browser-only difference: `st.data_editor` fails in stlite 1.9.2 (NameError `arrow_table`), so the label editor in
   the Analysis lab shows the table read-only with a one-sample-at-a-time form (`explorer.render_label_editor`).
   The console shows harmless "Download Button fetch error" messages from Streamlit's prefetch; clicking a download
