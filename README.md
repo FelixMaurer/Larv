@@ -140,3 +140,14 @@ Pyodide/WebAssembly), so it can be served as static files from any web host, ind
   the Analysis lab shows the table read-only with a one-sample-at-a-time form (`explorer.render_label_editor`).
   The console shows harmless "Download Button fetch error" messages from Streamlit's prefetch; clicking a download
   button works.
+
+---
+## GMM size states as in the manuscript (2026-10-13)
+
+`scripts/precompute_paper_gmm.py` (needs scikit-learn) refits the GMM exactly as the manuscript does
+(`fit_gmm` in the figure scripts: 13 features, 0.5 to 99.5 percentile filter on every feature, standardised,
+two-component diagonal GMM, n_init 3, random_state 3; Malchow restricted to Malchow photos, valid and
+size-reliable larvae) and stores the classes, posteriors and PC scores in `data_*/worms.parquet` and the summary
+in `data_*/gmm_info.json`. Result: Asendorf 26,398 larvae (15,603 Size 1, 10,795 Size 2), Malchow 155,094
+(66,240 / 88,854), identical to the paper. The app's earlier precomputed GMM (28,102 Asendorf larvae) used a
+different filter. The "Re-fit with k classes" controls still fit on the fly.
