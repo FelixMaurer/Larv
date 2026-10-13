@@ -96,3 +96,23 @@ The `worms` / `image_summary` tables here are **corrected** (originals in `_back
 - **NOT applied:** touching-larva *merge*-splitting (its heuristic is ~15% precision and the merge error is only ~0.6%).
 - **Validation:** pipeline precision **0.971** / recall **0.988** / count error **+4.4%** on a 12-tray VLM-labeled set (before correction). The transparent-FP contrast filter was tuned on a **96-detection blind VLM test set** and achieves **91% removal precision** at the chosen threshold (≈283 transparent artifacts removed, ~24 faint larvae lost).
 - **Caveats:** corrected counts are a *central* estimate — the debris router is ~88% precise and the contrast filter ~91% precise, so a small number of real (faint/pale) larvae are removed (mild under-count); ambiguous high-angle splits are left uncorrected. The size distribution shifts (debris/artifacts removed are small/faint, merged objects are larger), so the GMM size-state cutoffs move accordingly.
+
+---
+## Body-size instar classes (2026-10-13)
+
+Every size-reliable larva gets an instar class from its major axis: **L1 < 3.98 mm <= L2 < 7.70 mm <= L3**
+(`INSTAR_THRESHOLDS_MM` in `streamlit_app.py`). The thresholds come from the manuscript's calibration against
+stereo-microscope head-capsule width (126 larvae; head-capsule boundaries 0.33 and 0.46 mm; leave-one-out
+balanced accuracy 0.83, recall L1 0.95, L2 0.86, L3 0.68). Size-reliable = not two larvae merged head to tail
+(skeleton length >= 1.7 x median with solidity < 0.82) and not a rim artefact (solidity < 0.55 or aspect
+ratio > 14); Malchow ships its own `size_reliable` and `is_valid_larva` columns, which are used as they are.
+
+New image-level metrics (maps, 3D bars, trends, all views that list metrics): `instar_l1_count`,
+`instar_l2_count`, `instar_l3_count`, `instar_total_count`, `instar_l3_fraction`, `instar_l1_l2_fraction`,
+and the per-kg versions when plant-weight normalization is on. The larva table carries `instar_class`.
+Counts are the *assigned* classes; L2 and L3 overlap in body size, so the paper's site-level fractions are
+additionally corrected for misclassification (Asendorf 78% L3, Malchow 39% L3). Totals reproduce the paper:
+30,002 classified larvae at Asendorf, 176,675 at Malchow.
+
+Also: the tracked `__pycache__/*.pyc` files were removed from the repository (they were already in
+`.gitignore`).
