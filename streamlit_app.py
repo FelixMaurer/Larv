@@ -226,25 +226,11 @@ def main() -> None:
     )
 
     try:
-        summary_df, source_label = load_image_summary(data_dir)
+        (summary_df, source_label, parcel_df, parcel_source_label, images_df, images_source_label,
+         worms_df, worms_source_label, gmm_info) = prepare_project_data(data_dir)
     except Exception as exc:
         st.error(f"Could not load image_summary from the project data folder: {exc}")
         st.stop()
-
-    summary_df = repair_qr_metadata(summary_df)
-    parcel_df, parcel_source_label = load_parcel_metadata(data_dir)
-    summary_df = attach_parcel_metadata(summary_df, parcel_df)
-    summary_df = add_scale_columns(summary_df, fallback_mm_per_px=DEFAULT_MM_PER_PX)
-    images_df, images_source_label = load_optional_table(data_dir, "images")
-    worms_df, worms_source_label = load_optional_table(data_dir, "worms")
-    summary_df, worms_df, gmm_info = attach_gmm_size_classes(
-        summary_df,
-        worms_df,
-        fallback_mm_per_px=DEFAULT_MM_PER_PX,
-        data_dir=data_dir,
-    )
-    summary_df, worms_df = attach_instar_classes(summary_df, worms_df)
-    summary_df = add_weight_normalized_columns(summary_df)
 
     if summary_df.empty:
         st.warning("The image summary table is empty.")
@@ -385,13 +371,9 @@ def main() -> None:
             "They remain in the total image and larva counts, but are omitted from the grid plots."
         )
 
-    (tab_map, tab_3d, tab_table, tab_rows, tab_genotype, tab_metadata, tab_trend,
-     tab_cluster, tab_qc, tab_lab) = st.tabs(
-        ["2D map", "3D bars", "Counter grid", "Rows", "Genotypes", "Metadata maps",
-         "Trend analysis", "Clustering", "QC / missing", "🔬 Analysis lab"]
-    )
+    _view_main = explorer.view_selector(['2D map', '3D bars', 'Counter grid', 'Rows', 'Genotypes', 'Metadata maps', 'Trend analysis', 'Clustering', 'QC / missing', '🔬 Analysis lab'], key="view_main")
 
-    with tab_lab:
+    if _view_main == '🔬 Analysis lab':
         # Interactive half of the app (plot studio, gating, GMM lab, statistics,
         # sample labels, session save/restore). Kept in explorer.py so the validated
         # analyses above are unaffected.
@@ -403,13 +385,13 @@ def main() -> None:
             project=proj_key,
         )
 
-    with tab_map:
+    if _view_main == '2D map':
         st.plotly_chart(
             make_heatmap_figure(grid, x_col=x_col, y_col=y_col, metric=metric, metric_label=metric_label),
             use_container_width=True,
         )
 
-    with tab_3d:
+    if _view_main == '3D bars':
         st.plotly_chart(
             make_3d_bar_figure(
                 grid,
@@ -423,7 +405,7 @@ def main() -> None:
             use_container_width=True,
         )
 
-    with tab_table:
+    if _view_main == 'Counter grid':
         pivot = pivot_grid(grid)
         st.dataframe(pivot, use_container_width=True)
         st.download_button(
@@ -433,7 +415,7 @@ def main() -> None:
             mime="text/csv",
         )
 
-    with tab_rows:
+    if _view_main == 'Rows':
         columns_to_show = unique_existing_columns(
             [y_col, x_col, metric, "count", "count_absolute", "count_per_kg_plant_weight", "plant_weight_kg", "plant_weight_g", "n_plants", "qr_plot", "qr_condition", "qr_sample_id", "scale_mm_per_px_used", "scale_source", "qr_extra_suffix", "qr_text", "original_filename", "output_basename"],
             filtered_for_analysis.columns,
@@ -464,14 +446,14 @@ def main() -> None:
                 mime="text/csv",
             )
 
-    with tab_genotype:
+    if _view_main == 'Genotypes':
         render_genotype_analysis(
             filtered_for_analysis,
             worms_df=worms_df,
             fallback_mm_per_px=fallback_mm_per_px,
         )
 
-    with tab_metadata:
+    if _view_main == 'Metadata maps':
         render_metadata_maps(
             filtered_for_analysis,
             x_col=x_col,
@@ -482,13 +464,13 @@ def main() -> None:
             z_height_fraction=z_height_fraction,
         )
 
-    with tab_trend:
+    if _view_main == 'Trend analysis':
         render_trend_analysis(filtered_for_analysis, metric_cols=metric_cols, default_metric=default_metric, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px)
 
-    with tab_cluster:
+    if _view_main == 'Clustering':
         render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px, worms_df=worms_df, gmm_info=gmm_info)
 
-    with tab_qc:
+    if _view_main == 'QC / missing':
         render_qc_analysis(summary_df, filtered, images_df, worms_df, parcel_df, x_col=x_col, y_col=y_col)
 
     st.divider()
@@ -515,6 +497,33 @@ def main() -> None:
     if show_value_table:
         st.subheader("Current grid values")
         st.dataframe(pivot_grid(grid), use_container_width=True)
+
+
+@st.cache_data(show_spinner="Preparing the project data ...")
+def prepare_project_data(data_dir: str):
+    """Load one project and attach parcel metadata, scales, GMM size states and instar classes.
+
+    Cached per project: these steps do not depend on any widget, and repeating them on every rerun
+    (mostly the QR-metadata repair of the larva table inside attach_gmm_size_classes, about 4.5 s
+    natively and several times that in the browser build) dominated the time of every click.
+    """
+    summary_df, source_label = load_image_summary(data_dir)
+    summary_df = repair_qr_metadata(summary_df)
+    parcel_df, parcel_source_label = load_parcel_metadata(data_dir)
+    summary_df = attach_parcel_metadata(summary_df, parcel_df)
+    summary_df = add_scale_columns(summary_df, fallback_mm_per_px=DEFAULT_MM_PER_PX)
+    images_df, images_source_label = load_optional_table(data_dir, "images")
+    worms_df, worms_source_label = load_optional_table(data_dir, "worms")
+    summary_df, worms_df, gmm_info = attach_gmm_size_classes(
+        summary_df,
+        worms_df,
+        fallback_mm_per_px=DEFAULT_MM_PER_PX,
+        data_dir=data_dir,
+    )
+    summary_df, worms_df = attach_instar_classes(summary_df, worms_df)
+    summary_df = add_weight_normalized_columns(summary_df)
+    return (summary_df, source_label, parcel_df, parcel_source_label, images_df, images_source_label,
+            worms_df, worms_source_label, gmm_info)
 
 
 @st.cache_data(show_spinner=False)
@@ -1566,13 +1575,13 @@ def render_metadata_maps(
     k3.metric("Median", f"{float(finite_values.median()):.3g}" if len(finite_values) else "n/a")
     k4.metric("Occupied cells", f"{len(grid):,}")
 
-    t_heat, t_3d, t_table, t_trends = st.tabs(["2D metadata map", "3D metadata bars", "Metadata grid table", "Metadata trends"])
-    with t_heat:
+    _view_metadata = explorer.view_selector(['2D metadata map', '3D metadata bars', 'Metadata grid table', 'Metadata trends'], key="view_metadata")
+    if _view_metadata == '2D metadata map':
         st.plotly_chart(
             make_heatmap_figure(grid, x_col=map_x, y_col=map_y, metric=meta_metric, metric_label=metric_label),
             use_container_width=True,
         )
-    with t_3d:
+    if _view_metadata == '3D metadata bars':
         st.plotly_chart(
             make_3d_bar_figure(
                 grid,
@@ -1585,7 +1594,7 @@ def render_metadata_maps(
             ),
             use_container_width=True,
         )
-    with t_table:
+    if _view_metadata == 'Metadata grid table':
         pivot = pivot_grid(grid)
         st.dataframe(pivot, use_container_width=True)
         st.download_button(
@@ -1594,7 +1603,7 @@ def render_metadata_maps(
             file_name=f"metadata_grid_{meta_metric}_by_{map_x}_{map_y}.csv",
             mime="text/csv",
         )
-    with t_trends:
+    if _view_metadata == 'Metadata trends':
         render_metadata_trend_pair(df, meta_metric=meta_metric, x_col=map_x, y_col=map_y, unit_mode=unit_mode, mm_per_px=mm_per_px)
 
 
@@ -2755,9 +2764,9 @@ def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_
     else:
         k4.metric("Total larvae", "n/a")
 
-    tab_qr, tab_fields, tab_missing, tab_dupes, tab_weights, tab_tables = st.tabs(["Unreadable QR", "Missing QR fields", "Missing parcels", "Duplicate parcels", "Plant weights", "Table inventory"])
+    _view_qc = explorer.view_selector(['Unreadable QR', 'Missing QR fields', 'Missing parcels', 'Duplicate parcels', 'Plant weights', 'Table inventory'], key="view_qc")
 
-    with tab_qr:
+    if _view_qc == 'Unreadable QR':
         bad = qc_df.loc[~readable].copy()
         st.markdown("#### Images without a readable/complete QR code")
         st.caption("A row is listed when QR text is missing, QR detection is false, or any required QR field is missing after relaxed parsing.")
@@ -2765,7 +2774,7 @@ def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_
         st.dataframe(bad[show_cols] if show_cols else bad, use_container_width=True, height=420)
         st.download_button("Download unreadable QR list", bad.to_csv(index=False).encode("utf-8"), file_name="unreadable_or_incomplete_qr_images.csv", mime="text/csv")
 
-    with tab_fields:
+    if _view_qc == 'Missing QR fields':
         rows = []
         for col in required + ["qr_text", "qr_detected", "qr_method"]:
             if col in qc_df.columns:
@@ -2775,7 +2784,7 @@ def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_
         st.dataframe(field_df, use_container_width=True)
         st.download_button("Download missing-field summary", field_df.to_csv(index=False).encode("utf-8"), file_name="missing_qr_field_summary.csv", mime="text/csv")
 
-    with tab_missing:
+    if _view_qc == 'Missing parcels':
         st.markdown("#### Missing parcels for current filters and selected grid axes")
         missing = missing_grid_cells(filtered, x_col=x_col, y_col=y_col)
         if missing.empty:
@@ -2785,7 +2794,7 @@ def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_
             st.dataframe(rename_for_display(missing, unit_mode="pixels"), use_container_width=True, height=420)
             st.download_button("Download missing parcels", missing.to_csv(index=False).encode("utf-8"), file_name=f"missing_parcels_by_{x_col}_{y_col}.csv", mime="text/csv")
 
-    with tab_dupes:
+    if _view_qc == 'Duplicate parcels':
         st.markdown("#### Duplicate parcel assignments")
         dupes = duplicate_grid_cells(filtered, x_col=x_col, y_col=y_col)
         if dupes.empty:
@@ -2794,7 +2803,7 @@ def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_
             st.dataframe(rename_for_display(dupes, unit_mode="pixels"), use_container_width=True, height=420)
             st.download_button("Download duplicate parcels", dupes.to_csv(index=False).encode("utf-8"), file_name=f"duplicate_parcels_by_{x_col}_{y_col}.csv", mime="text/csv")
 
-    with tab_weights:
+    if _view_qc == 'Plant weights':
         st.markdown("#### Plant-weight metadata matching")
         if "plant_weight_kg" not in qc_df.columns:
             st.info("No plant-weight columns are available. Add `parcel_metadata.csv` to the app root.")
@@ -2822,7 +2831,7 @@ def render_qc_analysis(summary_df: pd.DataFrame, filtered: pd.DataFrame, images_
                     st.dataframe(missing_expected, use_container_width=True, height=320)
                     st.download_button("Download expected parcels without analyzed image", missing_expected.to_csv(index=False).encode("utf-8"), file_name="expected_parcels_without_analyzed_image.csv", mime="text/csv")
 
-    with tab_tables:
+    if _view_qc == 'Table inventory':
         rows = [{"table": "image_summary", "available": True, "rows": len(summary_df), "columns": len(summary_df.columns)}]
         rows.append({"table": "images", "available": images_df is not None, "rows": 0 if images_df is None else len(images_df), "columns": 0 if images_df is None else len(images_df.columns)})
         rows.append({"table": "worms", "available": worms_df is not None, "rows": 0 if worms_df is None else len(worms_df), "columns": 0 if worms_df is None else len(worms_df.columns)})
