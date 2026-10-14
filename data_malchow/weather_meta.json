@@ -1,0 +1,8 @@
+{
+ "station": "Kirchdorf/Poel",
+ "station_id": "02578",
+ "distance_km": 3,
+ "sowing": "2025-08-29",
+ "sampling": "2026-03-17",
+ "source": "DWD Climate Data Center, daily mean air temperature (TMK); extracted by C. Posada-Vergara, 14 Oct 2026"
+}

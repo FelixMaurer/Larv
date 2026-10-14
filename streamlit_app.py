@@ -374,7 +374,7 @@ def main() -> None:
             "in the totals above but not in the field maps."
         )
 
-    _view_main = explorer.view_selector(['2D map', '3D bars', 'Grid table', 'Data table', 'Genotypes', 'Metadata', 'Trends', 'GMM size states', 'QC', 'Analysis lab', 'Report'], key="view_main")
+    _view_main = explorer.view_selector(['2D map', '3D bars', 'Grid table', 'Data', 'Genotypes', 'Metadata', 'Trends', 'Size states', 'QC', 'Analysis lab', 'Weather', 'Report'], key="view_main")
 
     if _view_main == 'Analysis lab':
         # Interactive half of the app (plot studio, gating, GMM lab, statistics,
@@ -418,7 +418,7 @@ def main() -> None:
             mime="text/csv",
         )
 
-    if _view_main == 'Data table':
+    if _view_main == 'Data':
         columns_to_show = unique_existing_columns(
             [y_col, x_col, metric, "count", "count_absolute", "count_per_kg_plant_weight", "plant_weight_kg", "plant_weight_g", "n_plants", "qr_plot", "qr_condition", "qr_sample_id", "scale_mm_per_px_used", "scale_source", "qr_extra_suffix", "qr_text", "original_filename", "output_basename"],
             filtered_for_analysis.columns,
@@ -470,14 +470,92 @@ def main() -> None:
     if _view_main == 'Trends':
         render_trend_analysis(filtered_for_analysis, metric_cols=metric_cols, default_metric=default_metric, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px)
 
-    if _view_main == 'GMM size states':
+    if _view_main == 'Size states':
         render_clustering_analysis(filtered_for_analysis, metric_cols=metric_cols, x_col=x_col, y_col=y_col, unit_mode=unit_mode, mm_per_px=fallback_mm_per_px, worms_df=worms_df, gmm_info=gmm_info)
 
     if _view_main == 'QC':
         render_qc_analysis(summary_df, filtered, images_df, worms_df, parcel_df, x_col=x_col, y_col=y_col)
 
+    if _view_main == "Weather":
+        render_weather(proj_key)
+
     if _view_main == "Report":
         render_report(filtered_for_analysis, gmm_info, x_col=x_col, y_col=y_col)
+
+
+@st.cache_data(show_spinner=False)
+def load_weather() -> dict:
+    """Daily mean air temperature of both trial sites (data_*/weather_daily.csv + weather_meta.json)."""
+    out = {}
+    for key, proj in PROJECTS.items():
+        d = APP_DIR / proj["dir"]
+        if (d / "weather_daily.csv").exists() and (d / "weather_meta.json").exists():
+            t = pd.read_csv(d / "weather_daily.csv", parse_dates=["date"]).set_index("date")["tmean_c"]
+            out[key] = (t, json.loads((d / "weather_meta.json").read_text(encoding="utf-8")))
+    return out
+
+
+def render_weather(proj_key: str) -> None:
+    """Weather at the trial sites: daily and 7-day mean temperature, degree-days, key numbers."""
+    st.subheader("Weather at the trial sites")
+    data = load_weather()
+    if not data:
+        st.info("No weather data in the project folders.")
+        return
+    st.caption("Daily mean air temperature at the DWD stations nearest the trials (DWD Climate Data Center). "
+               "Degree-days are sums of the daily mean minus the base temperature over days above it. About 200 "
+               "degree-days above 4 °C are needed for egg development (Conrad 2019; Mathiasen et al. 2015).")
+    c1, c2, c3 = st.columns(3)
+    base = c1.number_input("Base temperature (°C)", value=4.0, step=0.5, key="weather_base")
+    first = min(t.index.min() for t, _ in data.values()).date()
+    last = max(t.index.max() for t, _ in data.values()).date()
+    start = c2.date_input("Degree-days from", value=pd.Timestamp("2025-11-01").date(), min_value=first,
+                          max_value=last, key="weather_start")
+    target = c3.number_input("Degree-day target", value=200.0, step=10.0, key="weather_target")
+    colors = {"asendorf": "#1f6fb2", "malchow": "#e2711d"}
+    fig = go.Figure()
+    fig2 = go.Figure()
+    rows = []
+    for key, (t, m) in data.items():
+        name = f"{PROJECTS[key]['label'].split(':')[0]} ({m['station']}, {m['distance_km']} km)"
+        dash = "solid" if key == "asendorf" else "dash"
+        fig.add_trace(go.Scatter(x=t.index, y=t, mode="lines", line=dict(color=colors.get(key), width=0.8),
+                                 opacity=0.4, name=f"{name}, daily", showlegend=False))
+        fig.add_trace(go.Scatter(x=t.index, y=t.rolling(7, center=True, min_periods=4).mean(), mode="lines",
+                                 line=dict(color=colors.get(key), width=2.5, dash=dash), name=name))
+        for k_, sym in (("sowing", "triangle-up"), ("sampling", "triangle-down")):
+            d = pd.Timestamp(m[k_])
+            if d in t.index:
+                fig.add_trace(go.Scatter(x=[d], y=[t.rolling(7, center=True, min_periods=4).mean().loc[d]],
+                                         mode="markers", marker=dict(symbol=sym, size=11, color=colors.get(key)),
+                                         name=f"{k_} {m[k_]}", showlegend=False, hovertemplate=f"{k_} {m[k_]}<extra></extra>"))
+        dd = (t.loc[pd.Timestamp(start):] - base).clip(lower=0).cumsum()
+        fig2.add_trace(go.Scatter(x=dd.index, y=dd, mode="lines", line=dict(color=colors.get(key), width=2.5, dash=dash),
+                                  name=PROJECTS[key]["label"].split(":")[0]))
+        samp = pd.Timestamp(m["sampling"])
+        reached = dd[dd >= target]
+        cold = (t.loc["2025-12-01":"2026-02-28"] < base).astype(int)
+        runs = cold.groupby((cold != cold.shift()).cumsum()).sum()
+        rows.append({
+            "Site": PROJECTS[key]["label"].split(":")[0],
+            "Station": f"{m['station']} ({m['station_id']}), {m['distance_km']} km",
+            "Sowing": m["sowing"], "Sampling": m["sampling"],
+            "Mean Dec to Feb (°C)": round(float(t.loc["2025-12-01":"2026-02-28"].mean()), 1),
+            f"Longest run below {base:g} °C, Dec to Feb (days)": int(runs.max()) if len(runs) else 0,
+            f"Degree-days from {start} to sampling": round(float(dd.loc[:samp].iloc[-1])) if (dd.index <= samp).any() else None,
+            f"Date {target:g} degree-days reached": str(reached.index[0].date()) if len(reached) else "not reached",
+        })
+    fig.add_hline(y=base, line=dict(color="#888", width=1, dash="dot"))
+    fig.update_layout(title="Daily mean air temperature (thin) and 7-day running mean (thick); triangles: sowing and sampling",
+                      yaxis_title="°C", height=420, legend=dict(orientation="h", y=-0.15), margin=dict(t=50, b=10))
+    st.plotly_chart(fig, use_container_width=True, key="weather_temp")
+    fig2.add_hline(y=target, line=dict(color="#888", width=1, dash="dot"))
+    for key, (t, m) in data.items():
+        fig2.add_vline(x=pd.Timestamp(m["sampling"]), line=dict(color=colors.get(key), width=1, dash="dot"))
+    fig2.update_layout(title=f"Degree-days above {base:g} °C since {start} (dotted vertical lines: sampling)",
+                       yaxis_title="degree-days", height=360, legend=dict(orientation="h", y=-0.2), margin=dict(t=50, b=10))
+    st.plotly_chart(fig2, use_container_width=True, key="weather_dd")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def render_report(filtered_for_analysis: pd.DataFrame, gmm_info: dict, x_col: str, y_col: str) -> None:
