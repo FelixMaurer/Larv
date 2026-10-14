@@ -22,9 +22,10 @@ CODE = ["streamlit_app.py", "explorer.py"]
 # Parquet tables plus the small metadata files; the CSV copies of the parquet tables are not needed.
 DATA = {
     "data_asendorf": ["image_summary.parquet", "images.parquet", "worms.parquet", "parcel_metadata.csv",
-                      "genotype_names.csv", "manifest.json", "gmm_info.json"],
+                      "genotype_names.csv", "manifest.json", "gmm_info.json", "weather_daily.csv", "weather_meta.json"],
     "data_malchow": ["image_summary.parquet", "worms.parquet", "parcel_metadata.csv", "genotype_names.csv",
-                     "manifest.json", "gmm_info.json", "trap_harvest_manual_larvae.csv"],
+                     "manifest.json", "gmm_info.json", "trap_harvest_manual_larvae.csv", "weather_daily.csv",
+                     "weather_meta.json"],
 }
 
 PAGE = """<!doctype html>

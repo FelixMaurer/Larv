@@ -15,7 +15,7 @@ from streamlit.testing.v1 import AppTest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))   # the app imports explorer.py from its own folder
 APP = str(ROOT / "streamlit_app.py")
-MAIN = ['2D map', '3D bars', 'Grid table', 'Data table', 'Genotypes', 'Metadata', 'Trends', 'GMM size states', 'QC', 'Analysis lab', 'Report']
+MAIN = ['2D map', '3D bars', 'Grid table', 'Data', 'Genotypes', 'Metadata', 'Trends', 'Size states', 'QC', 'Analysis lab', 'Weather', 'Report']
 SUB = {"Metadata": ("view_metadata", ["2D metadata map", "3D metadata bars", "Metadata grid table",
                                           "Metadata trends"]),
        "QC": ("view_qc", ["Unreadable QR", "Missing QR fields", "Missing parcels", "Duplicate parcels",
